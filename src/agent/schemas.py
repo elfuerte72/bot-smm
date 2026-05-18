@@ -11,7 +11,6 @@ class PostDraft(BaseModel):
     why_it_matters: str = Field(..., min_length=20, max_length=600)
     primary_source_url: HttpUrl
     extra_sources: list[HttpUrl] = Field(default_factory=list)
-    tags: list[str] = Field(default_factory=list)
 
 
 class NoNews(BaseModel):
