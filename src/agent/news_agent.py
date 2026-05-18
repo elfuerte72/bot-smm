@@ -19,6 +19,36 @@ class AgentError(RuntimeError):
 
 _JSON_BLOCK_RE = re.compile(r"\{(?:[^{}]|(?:\{[^{}]*\}))*\}", re.DOTALL)
 
+# em-dash и en-dash вокруг (возможных) пробелов
+_DASH_RE = re.compile(r"\s*[—–]\s*")
+
+
+_DOUBLE_COMMA_RE = re.compile(r",\s*,(\s*,)*")
+_COMMA_BEFORE_PUNCT_RE = re.compile(r",\s+([.,!?;:)])")
+_LEADING_COMMA_RE = re.compile(r"(^|\n)\s*,\s*")
+
+
+def _strip_dashes(text: str) -> str:
+    """Убирает «—» и «–» из текста, заменяя на «, ».
+
+    Модель регулярно срывается на тире, даже когда явно запрещено. Делаем
+    детерминированный фолбэк на стороне Python и подчищаем артефакты замены
+    (двойные запятые, запятые перед знаками препинания и в начале строки).
+    """
+    text = _DASH_RE.sub(", ", text)
+    text = _DOUBLE_COMMA_RE.sub(",", text)
+    text = _COMMA_BEFORE_PUNCT_RE.sub(r"\1", text)
+    text = _LEADING_COMMA_RE.sub(r"\1", text)
+    return text
+
+
+def _scrub_payload(payload: dict) -> dict:
+    """Прогоняет текстовые поля черновика через _strip_dashes."""
+    for key in ("title", "body", "why_it_matters"):
+        if isinstance(payload.get(key), str):
+            payload[key] = _strip_dashes(payload[key])
+    return payload
+
 
 def _extract_json(text: str) -> dict | None:
     """Достаёт первый валидный JSON-объект из текста.
@@ -91,6 +121,8 @@ async def generate_post(*, exclude_urls: list[str] | None = None) -> AgentResult
 
     if payload.get("no_news"):
         return NoNews.model_validate(payload)
+
+    payload = _scrub_payload(payload)
 
     try:
         return PostDraft.model_validate(payload)
