@@ -1,0 +1,16 @@
+.venv/
+__pycache__/
+*.pyc
+.env
+data/
+*.db
+.ruff_cache/
+.mypy_cache/
+.pytest_cache/
+.git/
+.gitignore
+.idea/
+.vscode/
+.DS_Store
+README.md
+.claude/
