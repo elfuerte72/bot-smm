@@ -7,12 +7,13 @@ from aiogram import Bot, Dispatcher
 from aiogram.client.default import DefaultBotProperties
 from aiogram.enums import ParseMode
 from aiogram.fsm.storage.memory import MemoryStorage
+from aiogram.types import BotCommand
 from loguru import logger
 
 from src.bot.handlers import router as bot_router
 from src.bot.middleware import OwnerOnlyMiddleware
 from src.config import settings
-from src.scheduler import build_scheduler
+from src.scheduler import build_scheduler, set_scheduler
 from src.storage.db import init_db
 
 
@@ -46,7 +47,17 @@ async def main() -> None:
         sorted(settings.allowed_user_ids),
     )
 
-    scheduler = build_scheduler(bot)
+    await bot.set_my_commands(
+        [
+            BotCommand(command="generate", description="Сгенерировать пост"),
+            BotCommand(command="status", description="Статус и расходы"),
+            BotCommand(command="cron", description="Настроить расписание"),
+            BotCommand(command="help", description="Помощь"),
+        ]
+    )
+
+    scheduler = await build_scheduler(bot)
+    set_scheduler(scheduler, bot)
     scheduler.start()
 
     try:

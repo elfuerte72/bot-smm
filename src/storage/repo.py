@@ -162,6 +162,108 @@ async def recent_source_urls(*, days: int = 14, limit: int = 50) -> list[str]:
             return [r[0] for r in rows if r[0]]
 
 
+async def record_api_usage(
+    *,
+    model: str,
+    input_tokens: int,
+    output_tokens: int,
+    cache_creation_tokens: int = 0,
+    cache_read_tokens: int = 0,
+    cost_usd: float = 0.0,
+) -> None:
+    async with get_conn() as conn:
+        await conn.execute(
+            """
+            INSERT INTO api_usage (
+                model, input_tokens, output_tokens,
+                cache_creation_tokens, cache_read_tokens, cost_usd
+            ) VALUES (?, ?, ?, ?, ?, ?)
+            """,
+            (
+                model,
+                input_tokens,
+                output_tokens,
+                cache_creation_tokens,
+                cache_read_tokens,
+                cost_usd,
+            ),
+        )
+        await conn.commit()
+
+
+async def usage_summary() -> dict[str, dict[str, float | int]]:
+    """Возвращает агрегаты {today, month, total} по локальной TZ SQLite (UTC)."""
+    queries = {
+        "today": (
+            "SELECT COALESCE(SUM(cost_usd),0), COUNT(*) FROM api_usage "
+            "WHERE date(ts)=date('now')"
+        ),
+        "week": (
+            "SELECT COALESCE(SUM(cost_usd),0), COUNT(*) FROM api_usage "
+            "WHERE date(ts) >= date('now','-6 days')"
+        ),
+        "month": (
+            "SELECT COALESCE(SUM(cost_usd),0), COUNT(*) FROM api_usage "
+            "WHERE strftime('%Y-%m', ts)=strftime('%Y-%m','now')"
+        ),
+        "total": "SELECT COALESCE(SUM(cost_usd),0), COUNT(*) FROM api_usage",
+    }
+    out: dict[str, dict[str, float | int]] = {}
+    async with get_conn() as conn:
+        for key, sql in queries.items():
+            async with conn.execute(sql) as cur:
+                r = await cur.fetchone()
+                out[key] = {"usd": float(r[0] or 0.0), "calls": int(r[1] or 0)}
+    return out
+
+
+async def usage_by_day(*, days: int = 7) -> list[dict[str, float | int | str]]:
+    """Возвращает по дням за последние N дней (включая сегодня), в порядке DESC."""
+    sql = (
+        "SELECT date(ts) AS d, COALESCE(SUM(cost_usd),0), COUNT(*) "
+        "FROM api_usage WHERE date(ts) >= date('now', ?) "
+        "GROUP BY d ORDER BY d DESC"
+    )
+    delta = f"-{days - 1} days"
+    async with get_conn() as conn:
+        async with conn.execute(sql, (delta,)) as cur:
+            rows = await cur.fetchall()
+    return [{"date": r[0], "usd": float(r[1]), "calls": int(r[2])} for r in rows]
+
+
+async def get_setting(key: str, default: str | None = None) -> str | None:
+    async with get_conn() as conn:
+        async with conn.execute(
+            "SELECT value FROM app_settings WHERE key = ?", (key,)
+        ) as cur:
+            row = await cur.fetchone()
+            return row[0] if row else default
+
+
+async def set_setting(key: str, value: str) -> None:
+    async with get_conn() as conn:
+        await conn.execute(
+            """
+            INSERT INTO app_settings (key, value) VALUES (?, ?)
+            ON CONFLICT(key) DO UPDATE SET value = excluded.value
+            """,
+            (key, value),
+        )
+        await conn.commit()
+
+
+async def get_cron_times() -> list[str] | None:
+    """Возвращает список HH:MM или None, если в БД ничего нет (нужен seed)."""
+    raw = await get_setting("cron_times")
+    if raw is None:
+        return None
+    return [x.strip() for x in raw.split(",") if x.strip()]
+
+
+async def set_cron_times(times: list[str]) -> None:
+    await set_setting("cron_times", ",".join(times))
+
+
 async def recent_topics(*, days: int = 7, limit: int = 30) -> list[str]:
     """Заголовки недавних постов и черновиков. Используется, чтобы агент не писал
     про одну и ту же новость, даже если у неё другой URL (другое издание)."""

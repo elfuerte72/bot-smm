@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 from dataclasses import dataclass
+from datetime import UTC
 
 from aiogram import Bot, F, Router
 from aiogram.exceptions import TelegramBadRequest
@@ -36,6 +37,10 @@ class EditState(StatesGroup):
     waiting_for_text = State()
 
 
+class CronState(StatesGroup):
+    waiting_for_times = State()
+
+
 @dataclass(slots=True)
 class _PersistedDraft:
     draft_id: int
@@ -53,8 +58,7 @@ class _PersistedDraft:
 async def cmd_start(message: Message, state: FSMContext) -> None:
     await state.clear()
     await message.answer(
-        "Привет. Это SMM-бот для канала про AI и техкомпании.\n"
-        "Жми кнопку ниже, чтобы сгенерировать новый пост.",
+        "Добро пожаловать, начальник. Это главное меню новостного отдела Aibromotion.",
         reply_markup=main_menu_keyboard(),
     )
 
@@ -71,6 +75,224 @@ async def cb_menu_generate(cq: CallbackQuery, state: FSMContext) -> None:
     await cq.answer()
     if cq.message:
         await _run_generation(cq.message)
+
+
+# ──────────────────────────────────────────────────────────────────────────────
+# /help, /status, /cron, /cancel
+# ──────────────────────────────────────────────────────────────────────────────
+
+HELP_TEXT = (
+    "<b>Команды бота</b>\n\n"
+    "• /start — открыть главное меню\n"
+    "• /generate — сгенерировать пост по свежему инфоповоду\n"
+    "• /status — канал публикации, расписание автогенерации, расходы API\n"
+    "• /cron — изменить расписание автогенерации (HH:MM через запятую)\n"
+    "• /cancel — отменить текущее действие (правку текста, ввод расписания)\n"
+    "• /help — эта справка\n\n"
+    "<b>Как работать с постом</b>\n"
+    "После /generate бот пришлёт превью с кнопками:\n"
+    "«Опубликовать» — отправить в канал.\n"
+    "«Перегенерировать» — попросить другую новость.\n"
+    "«Редактировать» — заменить тело поста своим текстом.\n"
+    "«Отклонить» — закрыть черновик без публикации.\n\n"
+    "Автогенерация дважды в день шлёт превью обоим админам — кто первый "
+    "одобрил, тот и опубликовал."
+)
+
+
+@router.message(Command("help"))
+async def cmd_help(message: Message, state: FSMContext) -> None:
+    await state.clear()
+    await message.answer(HELP_TEXT)
+
+
+@router.message(Command("cancel"))
+async def cmd_cancel(message: Message, state: FSMContext) -> None:
+    current = await state.get_state()
+    await state.clear()
+    if current:
+        await message.answer("Отменено.", reply_markup=main_menu_keyboard())
+    else:
+        await message.answer("Нечего отменять.", reply_markup=main_menu_keyboard())
+
+
+@router.message(Command("status"))
+async def cmd_status(message: Message, state: FSMContext) -> None:
+    await state.clear()
+    if message.bot is None:
+        return
+    await message.answer(await _build_status_text(message.bot))
+
+
+@router.message(Command("cron"))
+async def cmd_cron(message: Message, state: FSMContext) -> None:
+    await state.clear()
+    await _enter_cron_flow(message, state)
+
+
+@router.callback_query(F.data == "menu:status")
+async def cb_menu_status(cq: CallbackQuery, state: FSMContext) -> None:
+    await state.clear()
+    await cq.answer()
+    if cq.message and cq.bot:
+        await cq.message.answer(await _build_status_text(cq.bot))
+
+
+@router.callback_query(F.data == "menu:cron")
+async def cb_menu_cron(cq: CallbackQuery, state: FSMContext) -> None:
+    await cq.answer()
+    if cq.message:
+        await _enter_cron_flow(cq.message, state)
+
+
+@router.callback_query(F.data == "menu:help")
+async def cb_menu_help(cq: CallbackQuery, state: FSMContext) -> None:
+    await state.clear()
+    await cq.answer()
+    if cq.message:
+        await cq.message.answer(HELP_TEXT)
+
+
+async def _build_status_text(bot: Bot) -> str:
+    """Собирает текст для /status: канал, расписание, расходы."""
+    # 1) Канал
+    channel_repr = _escape_html(str(settings.channel_id))
+    channel_title: str | None = None
+    try:
+        chat = await bot.get_chat(settings.channel_id)
+        if chat.title:
+            channel_title = chat.title
+    except Exception as e:  # noqa: BLE001
+        logger.warning("status: не удалось получить чат канала: {}", e)
+
+    channel_line = f"<b>Канал:</b> {channel_repr}"
+    if channel_title:
+        channel_line = f"<b>Канал:</b> {_escape_html(channel_title)} ({channel_repr})"
+
+    # 2) Расписание
+    from src.scheduler import get_scheduler
+
+    schedule_lines: list[str] = []
+    scheduler = get_scheduler()
+    if scheduler is None:
+        schedule_lines.append("Планировщик не запущен.")
+    else:
+        jobs = sorted(
+            scheduler.get_jobs(),
+            key=lambda j: (j.next_run_time or _far_future()),
+        )
+        if not jobs:
+            schedule_lines.append("Расписание пустое.")
+        else:
+            for j in jobs:
+                t = j.next_run_time
+                next_s = t.strftime("%Y-%m-%d %H:%M") if t else "—"
+                hhmm = j.id.replace("cron_generate_", "").replace("_", ":")
+                schedule_lines.append(f"• {hhmm} (next: {next_s})")
+    schedule_block = "<b>Расписание ({}):</b>\n{}".format(
+        _escape_html(settings.cron_tz),
+        "\n".join(schedule_lines),
+    )
+
+    # 3) Расходы API — локальный счётчик
+    summary = await repo.usage_summary()
+    by_day = await repo.usage_by_day(days=7)
+
+    cost_lines = [
+        "<b>Расходы Claude API (по логам бота):</b>",
+        "• Сегодня: ${:.4f} ({} выз.)".format(
+            float(summary["today"]["usd"]), int(summary["today"]["calls"])
+        ),
+        "• За неделю: ${:.4f} ({} выз.)".format(
+            float(summary["week"]["usd"]), int(summary["week"]["calls"])
+        ),
+        "• Этот месяц: ${:.4f} ({} выз.)".format(
+            float(summary["month"]["usd"]), int(summary["month"]["calls"])
+        ),
+        "• Всего: ${:.4f} ({} выз.)".format(
+            float(summary["total"]["usd"]), int(summary["total"]["calls"])
+        ),
+    ]
+    if by_day:
+        cost_lines.append("")
+        cost_lines.append("<b>Последние 7 дней (UTC):</b>")
+        for r in by_day:
+            cost_lines.append(
+                "  {}: ${:.4f} ({} выз.)".format(r["date"], float(r["usd"]), int(r["calls"]))
+            )
+    cost_block = "\n".join(cost_lines)
+
+    return "\n\n".join([channel_line, schedule_block, cost_block])
+
+
+async def _enter_cron_flow(target: Message, state: FSMContext) -> None:
+    """Общая точка для /cron и кнопки «⏰ Расписание»: показывает текущее
+    расписание и переводит в FSM-state ожидания нового списка."""
+    await state.clear()
+    current = await repo.get_cron_times() or list(settings.cron_times)
+    current_str = ", ".join(current) if current else "(пусто)"
+    await state.set_state(CronState.waiting_for_times)
+    await target.answer(
+        f"Текущее расписание: <b>{_escape_html(current_str)}</b> "
+        f"({_escape_html(settings.cron_tz)}).\n\n"
+        "Пришли новый список времён через запятую в формате HH:MM.\n"
+        "Пример: <code>09:00,14:30,20:00</code>\n\n"
+        "/cancel — отмена."
+    )
+
+
+@router.message(CronState.waiting_for_times, F.text)
+async def on_cron_times(message: Message, state: FSMContext) -> None:
+    raw = (message.text or "").strip()
+    if not raw:
+        await message.answer("Пустой ввод. Пример: 09:00,14:30 или /cancel.")
+        return
+
+    from src.scheduler import parse_hhmm, reschedule_cron_times
+
+    parts = [p.strip() for p in raw.split(",") if p.strip()]
+    parsed: list[str] = []
+    for p in parts:
+        hm = parse_hhmm(p)
+        if hm is None:
+            await message.answer(
+                f"Не понял «{_escape_html(p)}». Формат HH:MM, например 09:00. "
+                "Попробуй ещё раз или /cancel."
+            )
+            return
+        parsed.append(f"{hm[0]:02d}:{hm[1]:02d}")
+
+    # дедуп + сортировка
+    unique = sorted(set(parsed))
+    if not unique:
+        await message.answer("Не вижу ни одного валидного времени. Попробуй ещё раз.")
+        return
+
+    await repo.set_cron_times(unique)
+    try:
+        applied = await reschedule_cron_times(unique)
+    except RuntimeError as e:
+        await state.clear()
+        await message.answer(f"Не удалось применить: {e}")
+        return
+
+    await state.clear()
+    await message.answer(
+        "Готово. Новое расписание: <b>{}</b> ({}).".format(
+            _escape_html(", ".join(applied)),
+            _escape_html(settings.cron_tz),
+        )
+    )
+
+
+def _escape_html(s: str) -> str:
+    return s.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
+
+
+def _far_future():
+    from datetime import datetime
+
+    return datetime.max.replace(tzinfo=UTC)
 
 
 # ──────────────────────────────────────────────────────────────────────────────

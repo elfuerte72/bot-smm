@@ -6,7 +6,12 @@ from aiogram.types import InlineKeyboardButton, InlineKeyboardMarkup
 def main_menu_keyboard() -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(
         inline_keyboard=[
-            [InlineKeyboardButton(text="🚀 Сгенерировать пост", callback_data="menu:generate")]
+            [InlineKeyboardButton(text="🚀 Сгенерировать пост", callback_data="menu:generate")],
+            [
+                InlineKeyboardButton(text="📊 Статус", callback_data="menu:status"),
+                InlineKeyboardButton(text="⏰ Расписание", callback_data="menu:cron"),
+            ],
+            [InlineKeyboardButton(text="❓ Помощь", callback_data="menu:help")],
         ]
     )
 

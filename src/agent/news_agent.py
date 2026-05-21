@@ -8,9 +8,11 @@ from anthropic import AsyncAnthropic
 from loguru import logger
 from pydantic import ValidationError
 
+from src.agent.pricing import estimate_cost_usd
 from src.agent.prompts import SYSTEM_PROMPT, build_user_prompt
 from src.agent.schemas import AgentResult, NoNews, PostDraft
 from src.config import settings
+from src.storage import repo
 
 
 class AgentError(RuntimeError):
@@ -70,6 +72,40 @@ def _extract_json(text: str) -> dict | None:
     return None
 
 
+async def _log_and_record_usage(model: str, usage) -> None:
+    """Пишет токены в loguru и фиксирует расход в локальном счётчике."""
+    in_t = int(getattr(usage, "input_tokens", 0) or 0)
+    out_t = int(getattr(usage, "output_tokens", 0) or 0)
+    cc_t = int(getattr(usage, "cache_creation_input_tokens", 0) or 0)
+    cr_t = int(getattr(usage, "cache_read_input_tokens", 0) or 0)
+    cost = estimate_cost_usd(
+        model,
+        input_tokens=in_t,
+        output_tokens=out_t,
+        cache_creation_tokens=cc_t,
+        cache_read_tokens=cr_t,
+    )
+    logger.info(
+        "Tokens: in={} out={} cache_create={} cache_read={} cost=${:.6f}",
+        in_t,
+        out_t,
+        cc_t,
+        cr_t,
+        cost,
+    )
+    try:
+        await repo.record_api_usage(
+            model=model,
+            input_tokens=in_t,
+            output_tokens=out_t,
+            cache_creation_tokens=cc_t,
+            cache_read_tokens=cr_t,
+            cost_usd=cost,
+        )
+    except Exception as e:  # noqa: BLE001
+        logger.warning("Не смог записать api_usage в БД: {}", e)
+
+
 def _final_text(response_content: list) -> str:
     """Собирает все text-блоки из ответа модели (после server tool calls)."""
     parts: list[str] = []
@@ -107,6 +143,7 @@ async def _shrink_draft(
         system=SYSTEM_PROMPT,
         messages=[{"role": "user", "content": fix_prompt}],
     )
+    await _log_and_record_usage(settings.anthropic_model, response.usage)
     text = _final_text(response.content)
     return _extract_json(text)
 
@@ -161,14 +198,7 @@ async def generate_post(
         messages=[{"role": "user", "content": user_prompt}],
     )
 
-    usage = response.usage
-    logger.info(
-        "Tokens: in={} out={} cache_create={} cache_read={}",
-        getattr(usage, "input_tokens", "?"),
-        getattr(usage, "output_tokens", "?"),
-        getattr(usage, "cache_creation_input_tokens", 0),
-        getattr(usage, "cache_read_input_tokens", 0),
-    )
+    await _log_and_record_usage(settings.anthropic_model, response.usage)
 
     text = _final_text(response.content)
     if not text:
