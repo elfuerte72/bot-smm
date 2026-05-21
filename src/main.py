@@ -12,6 +12,7 @@ from loguru import logger
 from src.bot.handlers import router as bot_router
 from src.bot.middleware import OwnerOnlyMiddleware
 from src.config import settings
+from src.scheduler import build_scheduler
 from src.storage.db import init_db
 
 
@@ -45,9 +46,13 @@ async def main() -> None:
         sorted(settings.allowed_user_ids),
     )
 
+    scheduler = build_scheduler(bot)
+    scheduler.start()
+
     try:
         await dp.start_polling(bot)
     finally:
+        scheduler.shutdown(wait=False)
         await bot.session.close()
 
 

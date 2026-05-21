@@ -44,5 +44,19 @@ class Settings(BaseSettings):
     web_search_max_uses: int = Field(5, alias="WEB_SEARCH_MAX_USES")
     web_search_country: str = Field("RU", alias="WEB_SEARCH_COUNTRY")
 
+    cron_times: Annotated[list[str], NoDecode] = Field(
+        default_factory=lambda: ["10:00", "18:00"], alias="CRON_TIMES"
+    )
+    cron_tz: str = Field("Europe/Moscow", alias="CRON_TZ")
+
+    @field_validator("cron_times", mode="before")
+    @classmethod
+    def _split_times(cls, v: object) -> object:
+        if v is None or v == "":
+            return ["10:00", "18:00"]
+        if isinstance(v, str):
+            return [x.strip() for x in v.split(",") if x.strip()]
+        return v
+
 
 settings = Settings()  # type: ignore[call-arg]

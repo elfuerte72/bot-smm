@@ -86,6 +86,26 @@ def _read_dimensions(content: bytes) -> tuple[int, int] | None:
         return None
 
 
+def normalize_for_telegram(content: bytes) -> bytes | None:
+    """Перегоняет картинку в чистый baseline JPEG.
+
+    Telegram периодически отбивает картинки с IMAGE_PROCESS_FAILED — типичный
+    случай: CDN отдаёт WebP/PNG/прогрессивный JPEG под расширением .jpg.
+    После перекодирования картинка точно проходит. Возвращает None, если
+    Pillow не смог открыть исходник.
+    """
+    try:
+        with Image.open(io.BytesIO(content)) as img:
+            if img.mode != "RGB":
+                img = img.convert("RGB")
+            out = io.BytesIO()
+            img.save(out, format="JPEG", quality=85, optimize=True, progressive=False)
+            return out.getvalue()
+    except (UnidentifiedImageError, OSError) as e:
+        logger.warning("normalize_for_telegram: не смог открыть/перекодировать: {}", e)
+        return None
+
+
 async def fetch_og_image(url: str) -> FetchedImage | None:
     """Достаёт URL og:image со страницы и скачивает его. None — если не удалось."""
     try:

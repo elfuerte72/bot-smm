@@ -13,6 +13,8 @@ dependencies = [
     "aiosqlite>=0.20",
     "loguru>=0.7",
     "pillow>=10.4",
+    "apscheduler>=3.10",
+    "tzdata>=2024.1",
 ]
 
 [build-system]

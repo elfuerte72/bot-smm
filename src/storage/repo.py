@@ -94,6 +94,32 @@ async def update_draft_text(draft_id: int, formatted_text: str) -> None:
         await conn.commit()
 
 
+async def claim_for_publish(draft_id: int) -> bool:
+    """Атомарный захват черновика для публикации: draft → publishing.
+
+    Возвращает True только если статус был 'draft' и удалось перевести в
+    'publishing'. Защищает от двойной публикации, когда превью разослано
+    нескольким получателям (cron-сценарий).
+    """
+    async with get_conn() as conn:
+        cur = await conn.execute(
+            "UPDATE drafts SET status = 'publishing' WHERE id = ? AND status = 'draft'",
+            (draft_id,),
+        )
+        await conn.commit()
+        return cur.rowcount == 1
+
+
+async def release_publish(draft_id: int) -> None:
+    """Откат захвата при ошибке отправки в канал: publishing → draft."""
+    async with get_conn() as conn:
+        await conn.execute(
+            "UPDATE drafts SET status = 'draft' WHERE id = ? AND status = 'publishing'",
+            (draft_id,),
+        )
+        await conn.commit()
+
+
 async def mark_published(draft_id: int, *, source_url: str, title: str, tg_message_id: int) -> None:
     async with get_conn() as conn:
         await conn.execute("UPDATE drafts SET status = 'published' WHERE id = ?", (draft_id,))
@@ -107,10 +133,15 @@ async def mark_published(draft_id: int, *, source_url: str, title: str, tg_messa
         await conn.commit()
 
 
-async def mark_rejected(draft_id: int) -> None:
+async def mark_rejected(draft_id: int) -> bool:
+    """Атомарный переход draft → rejected. Возвращает True, если захватили."""
     async with get_conn() as conn:
-        await conn.execute("UPDATE drafts SET status = 'rejected' WHERE id = ?", (draft_id,))
+        cur = await conn.execute(
+            "UPDATE drafts SET status = 'rejected' WHERE id = ? AND status = 'draft'",
+            (draft_id,),
+        )
         await conn.commit()
+        return cur.rowcount == 1
 
 
 async def recent_source_urls(*, days: int = 14, limit: int = 50) -> list[str]:
