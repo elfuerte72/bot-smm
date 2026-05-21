@@ -17,3 +17,10 @@ build/
 .vscode/
 .claude/
 uv.lock
+
+# Logs / coverage / tooling
+*.log
+.coverage
+htmlcov/
+.python-version
+.ipynb_checkpoints/
