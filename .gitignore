@@ -16,7 +16,6 @@ build/
 .idea/
 .vscode/
 .claude/
-uv.lock
 
 # Logs / coverage / tooling
 *.log
