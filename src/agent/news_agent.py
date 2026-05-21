@@ -152,6 +152,8 @@ async def generate_post(
     *,
     exclude_urls: list[str] | None = None,
     exclude_topics: list[str] | None = None,
+    topic: str | None = None,
+    source_url: str | None = None,
 ) -> AgentResult:
     """Один прогон агента: вызов Claude с web_search, парс JSON, валидация."""
     exclude_urls = exclude_urls or []
@@ -161,13 +163,18 @@ async def generate_post(
     user_prompt = build_user_prompt(
         exclude_urls=exclude_urls,
         exclude_topics=exclude_topics,
+        topic=topic,
+        source_url=source_url,
     )
 
     logger.info(
-        "Calling Claude (model={}, excluded urls={}, excluded topics={})",
+        "Calling Claude (model={}, excluded urls={}, excluded topics={}, "
+        "topic={!r}, source_url={!r})",
         settings.anthropic_model,
         len(exclude_urls),
         len(exclude_topics),
+        topic,
+        source_url,
     )
 
     response = await client.messages.create(

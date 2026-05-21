@@ -39,3 +39,22 @@ def edit_cancel_keyboard(draft_id: int) -> InlineKeyboardMarkup:
             [InlineKeyboardButton(text="Отмена правки", callback_data=f"editcancel:{draft_id}")]
         ]
     )
+
+
+def generation_mode_keyboard() -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(
+        inline_keyboard=[
+            [InlineKeyboardButton(text="⚡ Авто", callback_data="gen:auto")],
+            [InlineKeyboardButton(text="⚙️ Ручная настройка", callback_data="gen:manual")],
+        ]
+    )
+
+
+def manual_config_keyboard() -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(
+        inline_keyboard=[
+            [InlineKeyboardButton(text="✏️ Своя тема", callback_data="gen:topic")],
+            [InlineKeyboardButton(text="🔗 По ссылке", callback_data="gen:url")],
+            [InlineKeyboardButton(text="← Назад", callback_data="gen:back")],
+        ]
+    )

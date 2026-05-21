@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 from dataclasses import dataclass
 from datetime import UTC
+from urllib.parse import urlparse
 
 from aiogram import Bot, F, Router
 from aiogram.exceptions import TelegramBadRequest
@@ -20,7 +21,13 @@ from loguru import logger
 
 from src.agent.news_agent import AgentError, generate_post
 from src.agent.schemas import NoNews, PostDraft
-from src.bot.keyboards import edit_cancel_keyboard, main_menu_keyboard, preview_keyboard
+from src.bot.keyboards import (
+    edit_cancel_keyboard,
+    generation_mode_keyboard,
+    main_menu_keyboard,
+    manual_config_keyboard,
+    preview_keyboard,
+)
 from src.config import settings
 from src.media.og_image import fetch_best_image, normalize_for_telegram
 from src.storage import repo
@@ -39,6 +46,11 @@ class EditState(StatesGroup):
 
 class CronState(StatesGroup):
     waiting_for_times = State()
+
+
+class ManualGenState(StatesGroup):
+    waiting_for_topic = State()
+    waiting_for_url = State()
 
 
 @dataclass(slots=True)
@@ -66,7 +78,10 @@ async def cmd_start(message: Message, state: FSMContext) -> None:
 @router.message(Command("generate"))
 async def cmd_generate(message: Message, state: FSMContext) -> None:
     await state.clear()
-    await _run_generation(message)
+    await message.answer(
+        "Как генерим пост?",
+        reply_markup=generation_mode_keyboard(),
+    )
 
 
 @router.callback_query(F.data == "menu:generate")
@@ -74,7 +89,116 @@ async def cb_menu_generate(cq: CallbackQuery, state: FSMContext) -> None:
     await state.clear()
     await cq.answer()
     if cq.message:
+        await cq.message.answer(
+            "Как генерим пост?",
+            reply_markup=generation_mode_keyboard(),
+        )
+
+
+# ──────────────────────────────────────────────────────────────────────────────
+# Меню выбора режима генерации
+# ──────────────────────────────────────────────────────────────────────────────
+
+
+@router.callback_query(F.data == "gen:auto")
+async def cb_gen_auto(cq: CallbackQuery, state: FSMContext) -> None:
+    await state.clear()
+    await cq.answer()
+    await _strip_keyboard(cq)
+    if cq.message:
         await _run_generation(cq.message)
+
+
+@router.callback_query(F.data == "gen:manual")
+async def cb_gen_manual(cq: CallbackQuery, state: FSMContext) -> None:
+    await state.clear()
+    await cq.answer()
+    if cq.message is None:
+        return
+    try:
+        await cq.message.edit_text(
+            "Ручная настройка. Выбери источник:",
+            reply_markup=manual_config_keyboard(),
+        )
+    except TelegramBadRequest:
+        await cq.message.answer(
+            "Ручная настройка. Выбери источник:",
+            reply_markup=manual_config_keyboard(),
+        )
+
+
+@router.callback_query(F.data == "gen:back")
+async def cb_gen_back(cq: CallbackQuery, state: FSMContext) -> None:
+    await state.clear()
+    await cq.answer()
+    if cq.message is None:
+        return
+    try:
+        await cq.message.edit_text(
+            "Как генерим пост?",
+            reply_markup=generation_mode_keyboard(),
+        )
+    except TelegramBadRequest:
+        await cq.message.answer(
+            "Как генерим пост?",
+            reply_markup=generation_mode_keyboard(),
+        )
+
+
+@router.callback_query(F.data == "gen:topic")
+async def cb_gen_topic(cq: CallbackQuery, state: FSMContext) -> None:
+    await cq.answer()
+    if cq.message is None:
+        return
+    await state.set_state(ManualGenState.waiting_for_topic)
+    await _strip_keyboard(cq)
+    await cq.message.answer(
+        "Пришли тему или короткое описание события одним сообщением.\n"
+        "Например: «Tesla отчёт за Q1 2026» или «xAI открыл API для Grok 4: "
+        "цены, лимиты, доступ».\n\n"
+        "/cancel — отмена."
+    )
+
+
+@router.callback_query(F.data == "gen:url")
+async def cb_gen_url(cq: CallbackQuery, state: FSMContext) -> None:
+    await cq.answer()
+    if cq.message is None:
+        return
+    await state.set_state(ManualGenState.waiting_for_url)
+    await _strip_keyboard(cq)
+    await cq.message.answer(
+        "Пришли ссылку на статью (http/https). Бот прочитает её и напишет пост "
+        "в стиле канала.\n\n"
+        "/cancel — отмена."
+    )
+
+
+@router.message(ManualGenState.waiting_for_topic, F.text)
+async def on_manual_topic(message: Message, state: FSMContext) -> None:
+    raw = (message.text or "").strip()
+    if len(raw) < 3:
+        await message.answer("Слишком коротко. Опиши тему подробнее или /cancel.")
+        return
+    if len(raw) > 500:
+        await message.answer("Слишком длинно (>500 символов). Сократи или /cancel.")
+        return
+    await state.clear()
+    await _run_generation(message, topic=raw)
+
+
+@router.message(ManualGenState.waiting_for_url, F.text)
+async def on_manual_url(message: Message, state: FSMContext) -> None:
+    raw = (message.text or "").strip()
+    parsed = urlparse(raw)
+    if parsed.scheme not in {"http", "https"} or not parsed.netloc:
+        await message.answer(
+            "Это не похоже на ссылку. Жду URL вида https://example.com/article "
+            "или /cancel."
+        )
+        return
+    await state.clear()
+    await _run_generation(message, source_url=raw)
 
 
 # ──────────────────────────────────────────────────────────────────────────────
@@ -84,13 +208,18 @@ async def cb_menu_generate(cq: CallbackQuery, state: FSMContext) -> None:
 HELP_TEXT = (
     "<b>Команды бота</b>\n\n"
     "• /start — открыть главное меню\n"
-    "• /generate — сгенерировать пост по свежему инфоповоду\n"
+    "• /generate — выбрать режим генерации поста\n"
     "• /status — канал публикации, расписание автогенерации, расходы API\n"
     "• /cron — изменить расписание автогенерации (HH:MM через запятую)\n"
-    "• /cancel — отменить текущее действие (правку текста, ввод расписания)\n"
+    "• /cancel — отменить текущее действие (правку, ввод темы/URL, расписание)\n"
     "• /help — эта справка\n\n"
+    "<b>Режимы генерации</b>\n"
+    "После «🚀 Сгенерировать пост» бот спрашивает, как генерим:\n"
+    "• <b>⚡ Авто</b> — свежий AI-инфоповод (как в автогенерации).\n"
+    "• <b>⚙️ Ручная настройка</b> → <b>✏️ Своя тема</b> (ты пишешь тему/бриф) "
+    "или <b>🔗 По ссылке</b> (ты даёшь URL статьи, бот пишет пост по ней).\n\n"
     "<b>Как работать с постом</b>\n"
-    "После /generate бот пришлёт превью с кнопками:\n"
+    "Бот пришлёт превью с кнопками:\n"
     "«Опубликовать» — отправить в канал.\n"
     "«Перегенерировать» — попросить другую новость.\n"
     "«Редактировать» — заменить тело поста своим текстом.\n"
@@ -493,15 +622,38 @@ async def fallback_menu(message: Message) -> None:
 # ──────────────────────────────────────────────────────────────────────────────
 
 
-async def _run_generation(message: Message) -> None:
-    """Ручной флоу генерации одному пользователю (тот, кто вызвал команду/кнопку)."""
-    status = await message.answer("Ищу инфоповод и пишу пост…")
+async def _run_generation(
+    message: Message,
+    *,
+    topic: str | None = None,
+    source_url: str | None = None,
+) -> None:
+    """Ручной флоу генерации одному пользователю (тот, кто вызвал команду/кнопку).
+
+    `topic` — пользовательская тема, перебивает AI-тематику системного промпта.
+    `source_url` — прямой URL источника: бот пишет пост по содержимому статьи.
+    Для URL-режима фильтры по уже опубликованным URL/темам отключаем —
+    пользователь явно выбрал источник.
+    """
+    if source_url:
+        status_text = "Читаю статью и пишу пост…"
+    elif topic:
+        status_text = "Ищу инфоповод по теме и пишу пост…"
+    else:
+        status_text = "Ищу инфоповод и пишу пост…"
+    status = await message.answer(status_text)
     try:
-        exclude_urls = await repo.recent_source_urls()
-        exclude_topics = await repo.recent_topics()
+        if source_url:
+            exclude_urls: list[str] = []
+            exclude_topics: list[str] = []
+        else:
+            exclude_urls = await repo.recent_source_urls()
+            exclude_topics = await repo.recent_topics()
         result = await generate_post(
             exclude_urls=exclude_urls,
             exclude_topics=exclude_topics,
+            topic=topic,
+            source_url=source_url,
         )
     except AgentError as e:
         await status.edit_text(f"Не получилось сгенерировать пост: {e}")
