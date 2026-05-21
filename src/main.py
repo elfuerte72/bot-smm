@@ -31,14 +31,19 @@ async def main() -> None:
     )
     dp = Dispatcher(storage=MemoryStorage())
 
-    owner_mw = OwnerOnlyMiddleware(settings.owner_id)
+    owner_mw = OwnerOnlyMiddleware(settings.allowed_user_ids)
     dp.message.middleware(owner_mw)
     dp.callback_query.middleware(owner_mw)
 
     dp.include_router(bot_router)
 
     me = await bot.get_me()
-    logger.info("Bot started as @{} (owner_id={})", me.username, settings.owner_id)
+    logger.info(
+        "Bot started as @{} (owner_id={}, allowed_ids={})",
+        me.username,
+        settings.owner_id,
+        sorted(settings.allowed_user_ids),
+    )
 
     try:
         await dp.start_polling(bot)

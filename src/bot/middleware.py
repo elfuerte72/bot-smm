@@ -9,10 +9,10 @@ from loguru import logger
 
 
 class OwnerOnlyMiddleware(BaseMiddleware):
-    """Пропускает только апдейты от заданного owner_id. Остальных молча игнорирует."""
+    """Пропускает только апдейты от пользователей из allowed_ids. Остальных молча игнорирует."""
 
-    def __init__(self, owner_id: int) -> None:
-        self.owner_id = owner_id
+    def __init__(self, allowed_ids: set[int]) -> None:
+        self.allowed_ids = allowed_ids
 
     async def __call__(
         self,
@@ -26,8 +26,8 @@ class OwnerOnlyMiddleware(BaseMiddleware):
         elif isinstance(event, CallbackQuery) and event.from_user:
             user_id = event.from_user.id
 
-        if user_id is not None and user_id != self.owner_id:
-            logger.warning("Reject non-owner update from user_id={}", user_id)
+        if user_id is not None and user_id not in self.allowed_ids:
+            logger.warning("Reject non-allowed update from user_id={}", user_id)
             if isinstance(event, CallbackQuery):
                 await event.answer("Доступ запрещён", show_alert=False)
             return None

@@ -13,6 +13,7 @@ class DraftRow:
     raw_json: str
     formatted_text: str
     image_url: str | None
+    image_file_id: str | None
     primary_source_url: str
     status: str
 
@@ -36,11 +37,21 @@ async def save_draft(
         return cur.lastrowid or 0
 
 
+async def set_image_file_id(draft_id: int, file_id: str) -> None:
+    async with get_conn() as conn:
+        await conn.execute(
+            "UPDATE drafts SET image_file_id = ? WHERE id = ?",
+            (file_id, draft_id),
+        )
+        await conn.commit()
+
+
 async def get_draft(draft_id: int) -> DraftRow | None:
     async with get_conn() as conn:
         async with conn.execute(
             """
-            SELECT id, raw_json, formatted_text, image_url, primary_source_url, status
+            SELECT id, raw_json, formatted_text, image_url, image_file_id,
+                   primary_source_url, status
             FROM drafts WHERE id = ?
             """,
             (draft_id,),
@@ -53,8 +64,9 @@ async def get_draft(draft_id: int) -> DraftRow | None:
                 raw_json=row[1],
                 formatted_text=row[2],
                 image_url=row[3],
-                primary_source_url=row[4],
-                status=row[5],
+                image_file_id=row[4],
+                primary_source_url=row[5],
+                status=row[6],
             )
 
 
@@ -117,3 +129,43 @@ async def recent_source_urls(*, days: int = 14, limit: int = 50) -> list[str]:
         ) as cur:
             rows = await cur.fetchall()
             return [r[0] for r in rows if r[0]]
+
+
+async def recent_topics(*, days: int = 7, limit: int = 30) -> list[str]:
+    """Заголовки недавних постов и черновиков. Используется, чтобы агент не писал
+    про одну и ту же новость, даже если у неё другой URL (другое издание)."""
+    since = (datetime.utcnow() - timedelta(days=days)).isoformat()
+    titles: list[str] = []
+    async with get_conn() as conn:
+        async with conn.execute(
+            """
+            SELECT title FROM published
+            WHERE published_at >= ?
+            ORDER BY published_at DESC
+            LIMIT ?
+            """,
+            (since, limit),
+        ) as cur:
+            async for row in cur:
+                if row[0]:
+                    titles.append(row[0])
+
+        async with conn.execute(
+            """
+            SELECT raw_json FROM drafts
+            WHERE created_at >= ?
+            ORDER BY created_at DESC
+            LIMIT ?
+            """,
+            (since, limit),
+        ) as cur:
+            async for row in cur:
+                try:
+                    data = json.loads(row[0])
+                    t = data.get("title")
+                    if isinstance(t, str) and t and t not in titles:
+                        titles.append(t)
+                except json.JSONDecodeError:
+                    continue
+
+    return titles[:limit]

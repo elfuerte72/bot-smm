@@ -79,23 +79,74 @@ def _final_text(response_content: list) -> str:
     return "\n".join(parts).strip()
 
 
-async def generate_post(*, exclude_urls: list[str] | None = None) -> AgentResult:
+async def _shrink_draft(
+    client: AsyncAnthropic, payload: dict, errors: list[str]
+) -> dict | None:
+    """Просит модель ужать поля черновика до лимитов и возвращает новый JSON.
+
+    Вызов идёт без web_search: модели нужно только переписать существующий
+    черновик, новые факты искать не надо. Это и быстрее, и не тратит лимиты.
+    """
+    fix_prompt = (
+        "Черновик поста не прошёл валидацию pydantic. Ошибки:\n"
+        + "\n".join(f"- {e}" for e in errors)
+        + "\n\nТекущий JSON:\n"
+        + json.dumps(payload, ensure_ascii=False, indent=2)
+        + "\n\nИсправь длины полей:\n"
+        "- body: 400–650 символов (жёсткий потолок 700), считая HTML-теги;\n"
+        "- title: 40–80 символов;\n"
+        "- why_it_matters: 80–180 символов.\n"
+        "Сохрани смысл, HTML-разметку, primary_source_url и extra_sources.\n"
+        "Не добавляй новые факты, не используй «—» и «–».\n"
+        "Верни ТОЛЬКО исправленный JSON без markdown-обёртки."
+    )
+
+    response = await client.messages.create(
+        model=settings.anthropic_model,
+        max_tokens=2048,
+        system=SYSTEM_PROMPT,
+        messages=[{"role": "user", "content": fix_prompt}],
+    )
+    text = _final_text(response.content)
+    return _extract_json(text)
+
+
+async def generate_post(
+    *,
+    exclude_urls: list[str] | None = None,
+    exclude_topics: list[str] | None = None,
+) -> AgentResult:
     """Один прогон агента: вызов Claude с web_search, парс JSON, валидация."""
     exclude_urls = exclude_urls or []
+    exclude_topics = exclude_topics or []
     client = AsyncAnthropic(api_key=settings.anthropic_api_key)
 
-    user_prompt = build_user_prompt(exclude_urls=exclude_urls)
+    user_prompt = build_user_prompt(
+        exclude_urls=exclude_urls,
+        exclude_topics=exclude_topics,
+    )
 
     logger.info(
-        "Calling Claude (model={}, excluded={} urls)",
+        "Calling Claude (model={}, excluded urls={}, excluded topics={})",
         settings.anthropic_model,
         len(exclude_urls),
+        len(exclude_topics),
     )
 
     response = await client.messages.create(
         model=settings.anthropic_model,
         max_tokens=4096,
-        system=SYSTEM_PROMPT,
+        # cache_control на последнем блоке system делает breakpoint:
+        # tools + system кешируются на 5 минут. Повторный /generate в окне
+        # читает их по цене ~10% от input. Cache write на первой записи
+        # стоит +25% к обычной цене input — окупается со 2-го вызова.
+        system=[
+            {
+                "type": "text",
+                "text": SYSTEM_PROMPT,
+                "cache_control": {"type": "ephemeral"},
+            }
+        ],
         tools=[
             {
                 "type": "web_search_20250305",
@@ -108,6 +159,15 @@ async def generate_post(*, exclude_urls: list[str] | None = None) -> AgentResult
             }
         ],
         messages=[{"role": "user", "content": user_prompt}],
+    )
+
+    usage = response.usage
+    logger.info(
+        "Tokens: in={} out={} cache_create={} cache_read={}",
+        getattr(usage, "input_tokens", "?"),
+        getattr(usage, "output_tokens", "?"),
+        getattr(usage, "cache_creation_input_tokens", 0),
+        getattr(usage, "cache_read_input_tokens", 0),
     )
 
     text = _final_text(response.content)
@@ -127,8 +187,24 @@ async def generate_post(*, exclude_urls: list[str] | None = None) -> AgentResult
     try:
         return PostDraft.model_validate(payload)
     except ValidationError as e:
-        logger.error("PostDraft validation failed: {}\nPayload: {}", e, payload)
-        raise AgentError(f"PostDraft не прошёл валидацию: {e}") from e
+        errors = [f"{'.'.join(str(p) for p in err['loc'])}: {err['msg']}" for err in e.errors()]
+        logger.warning("PostDraft validation failed, retrying shrink: {}", errors)
+
+        fixed = await _shrink_draft(client, payload, errors)
+        if fixed is None:
+            logger.error("Shrink retry: модель не вернула JSON")
+            raise AgentError("Не нашёл JSON в ответе модели на ретрае") from e
+
+        fixed = _scrub_payload(fixed)
+        try:
+            return PostDraft.model_validate(fixed)
+        except ValidationError as e2:
+            logger.error(
+                "PostDraft validation failed after shrink retry: {}\nPayload: {}",
+                e2,
+                fixed,
+            )
+            raise AgentError(f"PostDraft не прошёл валидацию после ретрая: {e2}") from e2
 
 
 async def _cli() -> None:

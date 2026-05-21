@@ -12,6 +12,7 @@ CREATE TABLE IF NOT EXISTS drafts (
     raw_json TEXT NOT NULL,
     formatted_text TEXT NOT NULL,
     image_url TEXT,
+    image_file_id TEXT,
     primary_source_url TEXT NOT NULL,
     status TEXT NOT NULL DEFAULT 'draft'
 );
@@ -30,10 +31,21 @@ CREATE INDEX IF NOT EXISTS idx_drafts_status ON drafts(status);
 """
 
 
+async def _ensure_column(
+    conn: aiosqlite.Connection, table: str, column: str, col_def: str
+) -> None:
+    async with conn.execute(f"PRAGMA table_info({table})") as cur:
+        cols = [row[1] async for row in cur]
+    if column not in cols:
+        await conn.execute(f"ALTER TABLE {table} ADD COLUMN {column} {col_def}")
+        logger.info("Migrated: added {}.{}", table, column)
+
+
 async def init_db() -> None:
     settings.db_path.parent.mkdir(parents=True, exist_ok=True)
     async with aiosqlite.connect(settings.db_path) as conn:
         await conn.executescript(SCHEMA)
+        await _ensure_column(conn, "drafts", "image_file_id", "TEXT")
         await conn.commit()
     logger.info("SQLite ready at {}", settings.db_path)
 

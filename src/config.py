@@ -1,9 +1,10 @@
 from __future__ import annotations
 
 from pathlib import Path
+from typing import Annotated
 
-from pydantic import Field
-from pydantic_settings import BaseSettings, SettingsConfigDict
+from pydantic import Field, field_validator
+from pydantic_settings import BaseSettings, NoDecode, SettingsConfigDict
 
 
 class Settings(BaseSettings):
@@ -16,7 +17,23 @@ class Settings(BaseSettings):
 
     telegram_bot_token: str = Field(..., alias="TELEGRAM_BOT_TOKEN")
     owner_id: int = Field(..., alias="OWNER_ID")
+    extra_user_ids: Annotated[list[int], NoDecode] = Field(
+        default_factory=list, alias="EXTRA_USER_IDS"
+    )
     channel_id: str = Field(..., alias="CHANNEL_ID")
+
+    @field_validator("extra_user_ids", mode="before")
+    @classmethod
+    def _split_csv(cls, v: object) -> object:
+        if v is None or v == "":
+            return []
+        if isinstance(v, str):
+            return [int(x) for x in v.split(",") if x.strip()]
+        return v
+
+    @property
+    def allowed_user_ids(self) -> set[int]:
+        return {self.owner_id, *self.extra_user_ids}
 
     anthropic_api_key: str = Field(..., alias="ANTHROPIC_API_KEY")
     anthropic_model: str = Field("claude-sonnet-4-5", alias="ANTHROPIC_MODEL")

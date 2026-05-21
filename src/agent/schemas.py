@@ -4,11 +4,16 @@ from pydantic import BaseModel, Field, HttpUrl
 
 
 class PostDraft(BaseModel):
-    """Структурированный результат работы агента."""
+    """Структурированный результат работы агента.
 
-    title: str = Field(..., min_length=5, max_length=200)
-    body: str = Field(..., min_length=200, max_length=4000)
-    why_it_matters: str = Field(..., min_length=20, max_length=600)
+    Лимиты подобраны так, чтобы итоговый formatted_text влезал в Telegram
+    caption (1024 символа) и поэтому мог быть отправлен одним сообщением
+    photo+caption.
+    """
+
+    title: str = Field(..., min_length=10, max_length=120)
+    body: str = Field(..., min_length=200, max_length=750)
+    why_it_matters: str = Field(..., min_length=20, max_length=220)
     primary_source_url: HttpUrl
     extra_sources: list[HttpUrl] = Field(default_factory=list)
 

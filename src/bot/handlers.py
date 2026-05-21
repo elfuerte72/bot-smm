@@ -11,6 +11,7 @@ from aiogram.types import (
     BufferedInputFile,
     CallbackQuery,
     InlineKeyboardMarkup,
+    LinkPreviewOptions,
     Message,
 )
 from loguru import logger
@@ -19,7 +20,7 @@ from src.agent.news_agent import AgentError, generate_post
 from src.agent.schemas import NoNews, PostDraft
 from src.bot.keyboards import edit_cancel_keyboard, preview_keyboard
 from src.config import settings
-from src.media.og_image import FetchedImage, fetch_og_image
+from src.media.og_image import fetch_best_image
 from src.storage import repo
 from src.utils.tg_format import (
     fits_caption,
@@ -61,8 +62,12 @@ async def cmd_generate(message: Message, state: FSMContext) -> None:
 
     status = await message.answer("Ищу инфоповод и пишу пост…")
     try:
-        exclude = await repo.recent_source_urls()
-        result = await generate_post(exclude_urls=exclude)
+        exclude_urls = await repo.recent_source_urls()
+        exclude_topics = await repo.recent_topics()
+        result = await generate_post(
+            exclude_urls=exclude_urls,
+            exclude_topics=exclude_topics,
+        )
     except AgentError as e:
         await status.edit_text(f"Не получилось сгенерировать пост: {e}")
         return
@@ -107,30 +112,35 @@ async def cb_approve(cq: CallbackQuery) -> None:
         return
 
     text = draft.formatted_text
-    image_bytes = await _maybe_download(draft.image_url)
+    file_id = draft.image_file_id
 
     try:
-        if image_bytes and fits_caption(text):
+        if file_id and fits_caption(text):
             sent = await bot.send_photo(
                 chat_id=settings.channel_id,
-                photo=BufferedInputFile(image_bytes, filename="cover.jpg"),
+                photo=file_id,
                 caption=text,
             )
-        elif image_bytes:
-            await bot.send_photo(
-                chat_id=settings.channel_id,
-                photo=BufferedInputFile(image_bytes, filename="cover.jpg"),
-            )
+        elif file_id:
+            # caption переполнен (редкий случай — модель нарушила лимит).
+            # Шлём фото с уведомлением и отдельным сообщением текст.
+            logger.warning("Caption > 1024 chars ({}), splitting", len(text))
+            await bot.send_photo(chat_id=settings.channel_id, photo=file_id)
             sent = await bot.send_message(
                 chat_id=settings.channel_id,
                 text=truncate_to_message(text),
-                disable_web_page_preview=False,
+                link_preview_options=LinkPreviewOptions(is_disabled=True),
             )
         else:
+            # Нет нашей картинки. Фолбэк: текст + Telegram link-preview.
             sent = await bot.send_message(
                 chat_id=settings.channel_id,
                 text=truncate_to_message(text),
-                disable_web_page_preview=False,
+                link_preview_options=LinkPreviewOptions(
+                    url=draft.primary_source_url,
+                    prefer_large_media=True,
+                    show_above_text=True,
+                ),
             )
     except Exception as e:  # noqa: BLE001
         logger.exception("Publish failed")
@@ -165,17 +175,27 @@ async def cb_regenerate(cq: CallbackQuery) -> None:
     await _strip_keyboard(cq)
 
     status = await cq.message.answer("Ищу другой инфоповод…")
+
+    # помечаем текущий черновик rejected ДО генерации, чтобы его заголовок
+    # тоже попал в exclude_topics
+    await repo.mark_rejected(draft_id)
+
     try:
-        exclude = await repo.recent_source_urls()
-        # на всякий случай прибавим текущий
-        if draft.primary_source_url not in exclude:
-            exclude.append(draft.primary_source_url)
-        result = await generate_post(exclude_urls=exclude)
+        exclude_urls = await repo.recent_source_urls()
+        if draft.primary_source_url not in exclude_urls:
+            exclude_urls.append(draft.primary_source_url)
+        exclude_topics = await repo.recent_topics()
+        result = await generate_post(
+            exclude_urls=exclude_urls,
+            exclude_topics=exclude_topics,
+        )
     except AgentError as e:
         await status.edit_text(f"Не получилось перегенерировать: {e}")
         return
-
-    await repo.mark_rejected(draft_id)
+    except Exception as e:  # noqa: BLE001
+        logger.exception("Unexpected agent error during regenerate")
+        await status.edit_text(f"Внутренняя ошибка: {e}")
+        return
 
     if isinstance(result, NoNews):
         msg = "Других подходящих инфоповодов сейчас нет."
@@ -252,7 +272,8 @@ async def on_edit_text(message: Message, state: FSMContext) -> None:
         message,
         draft_id=draft_id,
         text=refreshed.formatted_text,
-        image_url=refreshed.image_url,
+        image_file_id=refreshed.image_file_id,
+        primary_source_url=refreshed.primary_source_url,
     )
 
 
@@ -286,18 +307,17 @@ async def _strip_keyboard(cq: CallbackQuery) -> None:
         pass
 
 
-async def _maybe_download(image_url: str | None) -> bytes | None:
-    if not image_url:
-        return None
-    fetched: FetchedImage | None = await fetch_og_image(image_url)
-    return fetched.content if fetched else None
-
-
 async def _send_preview(message: Message, draft: PostDraft) -> None:
-    """Сохраняет черновик в БД, скачивает картинку, шлёт превью с кнопками."""
+    """Сохраняет черновик в БД, шлёт превью владельцу.
+
+    Перебирает primary_source_url + extra_sources в поисках лучшего og:image
+    (не логотипа). Картинку загружаем в Telegram, сохраняем file_id, чтобы
+    Approve переиспользовал тот же кадр без повторной выкачки.
+    """
     formatted = format_post(draft)
 
-    fetched = await fetch_og_image(str(draft.primary_source_url))
+    source_urls = [str(draft.primary_source_url)] + [str(u) for u in draft.extra_sources]
+    fetched = await fetch_best_image(source_urls)
     image_url = fetched.url if fetched else None
 
     draft_id = await repo.save_draft(
@@ -307,12 +327,16 @@ async def _send_preview(message: Message, draft: PostDraft) -> None:
         primary_source_url=str(draft.primary_source_url),
     )
 
-    await _do_send_preview(
+    new_file_id = await _do_send_preview(
         message=message,
         draft_id=draft_id,
         text=formatted,
         image_bytes=fetched.content if fetched else None,
+        image_file_id=None,
+        primary_source_url=str(draft.primary_source_url),
     )
+    if new_file_id:
+        await repo.set_image_file_id(draft_id, new_file_id)
 
 
 async def _send_raw_preview(
@@ -320,14 +344,16 @@ async def _send_raw_preview(
     *,
     draft_id: int,
     text: str,
-    image_url: str | None,
+    image_file_id: str | None,
+    primary_source_url: str,
 ) -> None:
-    image_bytes = await _maybe_download(image_url)
     await _do_send_preview(
         message=message,
         draft_id=draft_id,
         text=text,
-        image_bytes=image_bytes,
+        image_bytes=None,
+        image_file_id=image_file_id,
+        primary_source_url=primary_source_url,
     )
 
 
@@ -337,24 +363,51 @@ async def _do_send_preview(
     draft_id: int,
     text: str,
     image_bytes: bytes | None,
-) -> None:
+    image_file_id: str | None,
+    primary_source_url: str,
+) -> str | None:
+    """Шлёт превью. Возвращает file_id, если впервые загружали байты картинки.
+
+    Главный путь: одно сообщение photo+caption (если есть картинка и текст
+    влезает в caption-лимит). Если картинки нет — текст + link-preview.
+    Если caption переполнен — предупреждаем и фолбэчим на 2 сообщения.
+    """
     kb: InlineKeyboardMarkup = preview_keyboard(draft_id)
 
-    if image_bytes and fits_caption(text):
-        await message.answer_photo(
-            photo=BufferedInputFile(image_bytes, filename="cover.jpg"),
-            caption=text,
+    photo: str | BufferedInputFile | None
+    fresh_upload = False
+    if image_file_id:
+        photo = image_file_id
+    elif image_bytes:
+        photo = BufferedInputFile(image_bytes, filename="cover.jpg")
+        fresh_upload = True
+    else:
+        photo = None
+
+    if photo is not None and fits_caption(text):
+        m = await message.answer_photo(photo=photo, caption=text, reply_markup=kb)
+        return m.photo[-1].file_id if fresh_upload and m.photo else None
+
+    if photo is not None:
+        # caption переполнен — это уже аномалия (модель нарушила лимит).
+        logger.warning("Caption > 1024 ({}), splitting preview", len(text))
+        m = await message.answer_photo(photo=photo)
+        new_file_id = m.photo[-1].file_id if fresh_upload and m.photo else None
+        await message.answer(
+            text=truncate_to_message(text),
             reply_markup=kb,
+            link_preview_options=LinkPreviewOptions(is_disabled=True),
         )
-        return
+        return new_file_id
 
-    if image_bytes:
-        await message.answer_photo(
-            photo=BufferedInputFile(image_bytes, filename="cover.jpg"),
-        )
-
+    # Нет картинки вообще — фолбэк на link-preview
     await message.answer(
         text=truncate_to_message(text),
         reply_markup=kb,
-        disable_web_page_preview=False,
+        link_preview_options=LinkPreviewOptions(
+            url=primary_source_url,
+            prefer_large_media=True,
+            show_above_text=True,
+        ),
     )
+    return None
