@@ -4,7 +4,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Что это
 
-Telegram-бот для русскоязычного SMM-канала про AI/tech. По кнопке (или по cron) генерирует пост через Anthropic Claude с native `web_search`, шлёт превью админам, после одобрения публикует в канал с OG-картинкой источника.
+Telegram-бот для Telegram-канала компании aibromotion (внедрение ИИ в бизнес) — экспертная новостная лента про AI/tech. По кнопке (или по cron) генерирует пост через Anthropic Claude с native `web_search`, шлёт превью админам, после одобрения публикует в канал с OG-картинкой источника.
 
 ## Команды
 
@@ -98,7 +98,9 @@ SQLite через `aiosqlite`, файл `./data/smm.db` (в Docker — `/data/sm
 
 ## Деплой
 
-Dockerfile собирается через `uv pip install --system .`, рантайм-пользователь `app:app`, volume `/data` для SQLite. На Dokploy: Application → Docker, переменные из `.env.example`, volume `/data`.
+- Dockerfile: двухстадийный `uv sync --frozen --no-dev` (deps отдельным слоем для кеша слоёв, затем код). Рантайм-пользователь `app:app` (uid/gid 1000), `CMD python -m src.main`.
+- `HEALTHCHECK` открывает `DB_PATH` и делает `SELECT 1` — ловит кейс «контейнер жив, но volume отвалился».
+- На Dokploy (Application → Docker): переменные из `.env.example`. **БД переживает редеплои только при смонтированном томе.** Нужен Volume Mount (именованный том, НЕ bind mount: при bind mount `/data` принадлежит root и `app` не запишет `smm.db`) с Mount Path ровно `/data`. Без тома `smm.db` лежит на эфемерном слое контейнера и теряется при каждом редеплое.
 
 ## История изменений и соглашения
 

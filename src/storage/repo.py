@@ -1,8 +1,10 @@
 from __future__ import annotations
 
 import json
+import re
 from dataclasses import dataclass
 from datetime import datetime, timedelta
+from difflib import SequenceMatcher
 
 from src.storage.db import get_conn
 
@@ -264,9 +266,8 @@ async def set_cron_times(times: list[str]) -> None:
     await set_setting("cron_times", ",".join(times))
 
 
-async def recent_topics(*, days: int = 7, limit: int = 30) -> list[str]:
-    """Заголовки недавних постов и черновиков. Используется, чтобы агент не писал
-    про одну и ту же новость, даже если у неё другой URL (другое издание)."""
+async def _recent_titles(*, days: int, limit: int) -> list[str]:
+    """Заголовки опубликованных постов и черновиков за последние N дней."""
     since = (datetime.utcnow() - timedelta(days=days)).isoformat()
     titles: list[str] = []
     async with get_conn() as conn:
@@ -301,4 +302,45 @@ async def recent_topics(*, days: int = 7, limit: int = 30) -> list[str]:
                 except json.JSONDecodeError:
                     continue
 
+    return titles
+
+
+async def recent_topics(*, days: int = 7, limit: int = 30) -> list[str]:
+    """Заголовки недавних постов и черновиков. Используется, чтобы агент не писал
+    про одну и ту же новость, даже если у неё другой URL (другое издание)."""
+    titles = await _recent_titles(days=days, limit=limit)
     return titles[:limit]
+
+
+def _normalize_title(text: str) -> str:
+    """Нижний регистр, только буквы/цифры/пробелы — для сравнения тем."""
+    return re.sub(r"[^0-9a-zа-яё ]+", " ", text.lower()).strip()
+
+
+async def find_similar_topics(headline: str, *, days: int = 14, limit: int = 5) -> list[str]:
+    """Жёсткая проверка дублей: ищет среди недавних заголовков похожие на headline.
+
+    Используется client tool check_topic_covered: агент проверяет найденный
+    инфоповод до отправки поста. Совпадением считаем высокий
+    SequenceMatcher.ratio либо заметное пересечение значимых слов (двойная
+    защита: ratio ловит перефразировки, пересечение слов — разный порядок).
+    """
+    headline_norm = _normalize_title(headline)
+    if not headline_norm:
+        return []
+    headline_words = {w for w in headline_norm.split() if len(w) > 3}
+
+    matches: list[str] = []
+    for title in await _recent_titles(days=days, limit=50):
+        title_norm = _normalize_title(title)
+        if not title_norm:
+            continue
+        ratio = SequenceMatcher(None, headline_norm, title_norm).ratio()
+        title_words = {w for w in title_norm.split() if len(w) > 3}
+        overlap = len(headline_words & title_words) / len(headline_words) if headline_words else 0.0
+        if ratio >= 0.6 or overlap >= 0.6:
+            matches.append(title)
+        if len(matches) >= limit:
+            break
+
+    return matches

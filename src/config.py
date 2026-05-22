@@ -43,6 +43,7 @@ class Settings(BaseSettings):
 
     web_search_max_uses: int = Field(5, alias="WEB_SEARCH_MAX_USES")
     web_search_country: str = Field("RU", alias="WEB_SEARCH_COUNTRY")
+    web_fetch_max_uses: int = Field(3, alias="WEB_FETCH_MAX_USES")
 
     cron_times: Annotated[list[str], NoDecode] = Field(
         default_factory=lambda: ["10:00", "18:00"], alias="CRON_TIMES"

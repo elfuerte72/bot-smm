@@ -16,14 +16,17 @@ from src.storage import repo
 
 
 class AgentError(RuntimeError):
-    """Что-то пошло не так в работе агента (нет JSON, нет ответа и т.п.)."""
+    """Что-то пошло не так в работе агента (нет ответа, лимит итераций и т.п.)."""
 
 
-_JSON_BLOCK_RE = re.compile(r"\{(?:[^{}]|(?:\{[^{}]*\}))*\}", re.DOTALL)
+# Сколько раз готовы прокрутить tool-use цикл: server tools (web_search,
+# web_fetch) API отрабатывает внутри одного ответа, итерации тратятся на
+# client tools (check_topic_covered, повторный submit_post после ошибки
+# валидации). 6 хватает на проверку темы + пару ретраев длины.
+_MAX_ITERATIONS = 6
 
 # em-dash и en-dash вокруг (возможных) пробелов
 _DASH_RE = re.compile(r"\s*[—–]\s*")
-
 
 _DOUBLE_COMMA_RE = re.compile(r",\s*,(\s*,)*")
 _COMMA_BEFORE_PUNCT_RE = re.compile(r",\s+([.,!?;:)])")
@@ -52,24 +55,117 @@ def _scrub_payload(payload: dict) -> dict:
     return payload
 
 
-def _extract_json(text: str) -> dict | None:
-    """Достаёт первый валидный JSON-объект из текста.
+# Server tool: поиск свежих инфоповодов и проверка фактов.
+_WEB_SEARCH_TOOL = {
+    "type": "web_search_20250305",
+    "name": "web_search",
+    "max_uses": settings.web_search_max_uses,
+    "user_location": {
+        "type": "approximate",
+        "country": settings.web_search_country,
+    },
+}
 
-    Модель просили вернуть голый JSON, но иногда обёрнет в ```json … ```.
-    """
-    text = text.strip()
-    # уберём ```json ... ``` если есть
-    if text.startswith("```"):
-        text = re.sub(r"^```(?:json)?\s*", "", text)
-        text = re.sub(r"\s*```$", "", text)
+# Server tool: чтение конкретной страницы по URL (режим source_url).
+_WEB_FETCH_TOOL = {
+    "type": "web_fetch_20250910",
+    "name": "web_fetch",
+    "max_uses": settings.web_fetch_max_uses,
+}
 
-    for match in _JSON_BLOCK_RE.finditer(text):
-        candidate = match.group(0)
-        try:
-            return json.loads(candidate)
-        except json.JSONDecodeError:
-            continue
-    return None
+# Client tool: единственный способ вернуть готовый пост. strict гарантирует
+# структуру JSON; длины полей всё равно проверяет PostDraft (см. цикл ниже).
+_SUBMIT_POST_TOOL = {
+    "name": "submit_post",
+    "description": "Вернуть готовый пост для канала. Единственный способ отдать результат.",
+    "strict": True,
+    "input_schema": {
+        "type": "object",
+        "additionalProperties": False,
+        "properties": {
+            "title": {
+                "type": "string",
+                "description": "Заголовок-хук, plain text без HTML, без точки в конце. "
+                "Целевая длина 40-90 символов.",
+            },
+            "body": {
+                "type": "string",
+                "description": "HTML-форматированный текст для Telegram, только "
+                "разрешённые теги. Целевая длина 300-550 символов, жёсткий потолок 650.",
+            },
+            "takeaway": {
+                "type": "string",
+                "description": "Экспертный вывод без ярлыка. Целевая длина 80-220 символов.",
+            },
+            "primary_source_url": {
+                "type": "string",
+                "description": "URL самого авторитетного источника новости.",
+            },
+            "extra_sources": {
+                "type": "array",
+                "items": {"type": "string"},
+                "description": "Дополнительные URL-источники. Пустой массив, если их нет.",
+            },
+        },
+        "required": ["title", "body", "takeaway", "primary_source_url", "extra_sources"],
+    },
+}
+
+# Client tool: способ сообщить, что подходящей новости нет.
+_REPORT_NO_NEWS_TOOL = {
+    "name": "report_no_news",
+    "description": "Сообщить, что подходящей свежей новости нет.",
+    "strict": True,
+    "input_schema": {
+        "type": "object",
+        "additionalProperties": False,
+        "properties": {
+            "reason": {
+                "type": "string",
+                "description": "Краткое объяснение, почему пост не сделан.",
+            },
+        },
+        "required": ["reason"],
+    },
+}
+
+# Client tool: жёсткая проверка дублей тем через SQLite.
+_CHECK_TOPIC_TOOL = {
+    "name": "check_topic_covered",
+    "description": "Проверить, не публиковал ли канал уже пост про это событие. "
+    "Вызови перед submit_post с заголовком или сутью найденной новости.",
+    "strict": True,
+    "input_schema": {
+        "type": "object",
+        "additionalProperties": False,
+        "properties": {
+            "headline": {
+                "type": "string",
+                "description": "Заголовок или краткая суть найденной новости.",
+            },
+        },
+        "required": ["headline"],
+    },
+}
+
+_TOOLS = [
+    _WEB_SEARCH_TOOL,
+    _WEB_FETCH_TOOL,
+    _SUBMIT_POST_TOOL,
+    _REPORT_NO_NEWS_TOOL,
+    _CHECK_TOPIC_TOOL,
+]
+
+# cache_control на последнем блоке system делает breakpoint: tools + system
+# кешируются на 5 минут. Повторный /generate в окне читает их по цене ~10%
+# от input. Cache write на первой записи стоит +25% — окупается со 2-го вызова.
+_SYSTEM_BLOCKS = [
+    {
+        "type": "text",
+        "text": SYSTEM_PROMPT,
+        "cache_control": {"type": "ephemeral"},
+    }
+]
 
 
 async def _log_and_record_usage(model: str, usage) -> None:
@@ -106,61 +202,17 @@ async def _log_and_record_usage(model: str, usage) -> None:
         logger.warning("Не смог записать api_usage в БД: {}", e)
 
 
-def _final_text(response_content: list) -> str:
-    """Собирает все text-блоки из ответа модели (после server tool calls)."""
-    parts: list[str] = []
-    for block in response_content:
-        if getattr(block, "type", None) == "text":
-            parts.append(block.text)
-    return "\n".join(parts).strip()
-
-
-async def _shrink_draft(
-    client: AsyncAnthropic, payload: dict, errors: list[str]
-) -> dict | None:
-    """Просит модель ужать поля черновика до лимитов и возвращает новый JSON.
-
-    Вызов идёт без web_search: модели нужно только переписать существующий
-    черновик, новые факты искать не надо. Это и быстрее, и не тратит лимиты.
-    """
-    fix_prompt = (
-        "Это чисто техническая правка уже принятого черновика. НЕ оценивай "
-        "релевантность темы и НЕ отказывайся: тема могла быть задана "
-        "пользователем вручную, ограничения тематики канала здесь не "
-        "применяются. Твоя единственная задача, привести длины полей к "
-        "лимитам. Всегда возвращай JSON, никаких отказов и пояснений прозой.\n\n"
-        "Черновик поста не прошёл валидацию pydantic. Ошибки:\n"
-        + "\n".join(f"- {e}" for e in errors)
-        + "\n\nТекущий JSON:\n"
-        + json.dumps(payload, ensure_ascii=False, indent=2)
-        + "\n\nИсправь длины полей:\n"
-        "- body: 300–550 символов (жёсткий потолок 650), считая HTML-теги;\n"
-        "- title: 40–90 символов;\n"
-        "- takeaway: 80–220 символов.\n"
-        "Сохрани смысл, HTML-разметку, primary_source_url и extra_sources.\n"
-        "Не добавляй новые факты, не используй «—» и «–».\n"
-        "Верни ТОЛЬКО исправленный JSON без markdown-обёртки."
+async def _handle_check_topic(headline: str) -> str:
+    """Содержимое tool_result для check_topic_covered: список похожих тем."""
+    matches = await repo.find_similar_topics(headline)
+    if not matches:
+        return "Совпадений не найдено: тема свободна, можно писать пост."
+    listed = "\n".join(f"- {m}" for m in matches)
+    return (
+        "Тема уже освещена. Похожие заголовки недавних постов:\n"
+        + listed
+        + "\nНайди другой инфоповод и проверь его снова."
     )
-
-    # max_tokens как у основного вызова: при 2048 модель иногда добавляет
-    # вступление перед JSON, ответ обрывается на max_tokens, и JSON остаётся
-    # без закрывающей скобки. Тогда _extract_json не находит блок.
-    response = await client.messages.create(
-        model=settings.anthropic_model,
-        max_tokens=4096,
-        system=SYSTEM_PROMPT,
-        messages=[{"role": "user", "content": fix_prompt}],
-    )
-    await _log_and_record_usage(settings.anthropic_model, response.usage)
-    text = _final_text(response.content)
-    result = _extract_json(text)
-    if result is None:
-        logger.error(
-            "Shrink retry: JSON не извлечён. stop_reason={}, текст: {}",
-            response.stop_reason,
-            text[:500],
-        )
-    return result
 
 
 async def generate_post(
@@ -170,10 +222,16 @@ async def generate_post(
     topic: str | None = None,
     source_url: str | None = None,
 ) -> AgentResult:
-    """Один прогон агента: вызов Claude с web_search, парс JSON, валидация."""
+    """Один прогон агента: tool-use цикл с Claude.
+
+    Модель сама ходит в web_search/web_fetch (server tools), проверяет дубли
+    через check_topic_covered и возвращает результат строго через client tool
+    submit_post или report_no_news. Парсить текст не нужно — берём tool input.
+    """
     exclude_urls = exclude_urls or []
     exclude_topics = exclude_topics or []
     client = AsyncAnthropic(api_key=settings.anthropic_api_key)
+    model = settings.anthropic_model
 
     user_prompt = build_user_prompt(
         exclude_urls=exclude_urls,
@@ -185,78 +243,95 @@ async def generate_post(
     logger.info(
         "Calling Claude (model={}, excluded urls={}, excluded topics={}, "
         "topic={!r}, source_url={!r})",
-        settings.anthropic_model,
+        model,
         len(exclude_urls),
         len(exclude_topics),
         topic,
         source_url,
     )
 
-    response = await client.messages.create(
-        model=settings.anthropic_model,
-        max_tokens=4096,
-        # cache_control на последнем блоке system делает breakpoint:
-        # tools + system кешируются на 5 минут. Повторный /generate в окне
-        # читает их по цене ~10% от input. Cache write на первой записи
-        # стоит +25% к обычной цене input — окупается со 2-го вызова.
-        system=[
-            {
-                "type": "text",
-                "text": SYSTEM_PROMPT,
-                "cache_control": {"type": "ephemeral"},
-            }
-        ],
-        tools=[
-            {
-                "type": "web_search_20250305",
-                "name": "web_search",
-                "max_uses": settings.web_search_max_uses,
-                "user_location": {
-                    "type": "approximate",
-                    "country": settings.web_search_country,
-                },
-            }
-        ],
-        messages=[{"role": "user", "content": user_prompt}],
-    )
+    messages: list[dict] = [{"role": "user", "content": user_prompt}]
+    nudged = False
 
-    await _log_and_record_usage(settings.anthropic_model, response.usage)
+    for _ in range(_MAX_ITERATIONS):
+        response = await client.messages.create(
+            model=model,
+            max_tokens=4096,
+            system=_SYSTEM_BLOCKS,
+            tools=_TOOLS,
+            messages=messages,
+        )
+        await _log_and_record_usage(model, response.usage)
+        messages.append({"role": "assistant", "content": response.content})
 
-    text = _final_text(response.content)
-    if not text:
-        raise AgentError("Модель не вернула финальный текст — нет text-блоков в ответе")
+        # type == "tool_use" — только client tools; server tools (web_search,
+        # web_fetch) приходят как server_tool_use и обрабатываются API сами.
+        client_calls = [b for b in response.content if getattr(b, "type", None) == "tool_use"]
 
-    payload = _extract_json(text)
-    if payload is None:
-        logger.error("Ответ модели не содержит JSON. Текст: {}", text[:500])
-        raise AgentError("Не нашёл JSON в ответе модели")
+        if not client_calls:
+            # pause_turn: server tool ещё работает — продолжаем без новых сообщений.
+            if response.stop_reason == "pause_turn":
+                continue
+            if not nudged:
+                nudged = True
+                messages.append(
+                    {
+                        "role": "user",
+                        "content": "Заверши работу: вызови submit_post с готовым "
+                        "постом или report_no_news, если подходящей новости нет.",
+                    }
+                )
+                continue
+            raise AgentError("Модель не вызвала submit_post или report_no_news")
 
-    if payload.get("no_news"):
-        return NoNews.model_validate(payload)
+        tool_results: list[dict] = []
+        for call in client_calls:
+            if call.name == "report_no_news":
+                return NoNews(reason=call.input.get("reason"))
 
-    payload = _scrub_payload(payload)
+            if call.name == "check_topic_covered":
+                content = await _handle_check_topic(call.input.get("headline", ""))
+                tool_results.append(
+                    {"type": "tool_result", "tool_use_id": call.id, "content": content}
+                )
+                continue
 
-    try:
-        return PostDraft.model_validate(payload)
-    except ValidationError as e:
-        errors = [f"{'.'.join(str(p) for p in err['loc'])}: {err['msg']}" for err in e.errors()]
-        logger.warning("PostDraft validation failed, retrying shrink: {}", errors)
+            if call.name == "submit_post":
+                payload = _scrub_payload(dict(call.input))
+                try:
+                    return PostDraft.model_validate(payload)
+                except ValidationError as e:
+                    errors = [
+                        f"{'.'.join(str(p) for p in err['loc'])}: {err['msg']}"
+                        for err in e.errors()
+                    ]
+                    logger.warning("submit_post не прошёл валидацию: {}", errors)
+                    tool_results.append(
+                        {
+                            "type": "tool_result",
+                            "tool_use_id": call.id,
+                            "is_error": True,
+                            "content": "Пост не прошёл валидацию:\n"
+                            + "\n".join(f"- {e}" for e in errors)
+                            + "\nИсправь длины полей (title 40-90, body 300-550 "
+                            "потолок 650, takeaway 80-220) и вызови submit_post снова.",
+                        }
+                    )
+                continue
 
-        fixed = await _shrink_draft(client, payload, errors)
-        if fixed is None:
-            logger.error("Shrink retry: модель не вернула JSON")
-            raise AgentError("Не нашёл JSON в ответе модели на ретрае") from e
-
-        fixed = _scrub_payload(fixed)
-        try:
-            return PostDraft.model_validate(fixed)
-        except ValidationError as e2:
-            logger.error(
-                "PostDraft validation failed after shrink retry: {}\nPayload: {}",
-                e2,
-                fixed,
+            logger.warning("Неизвестный инструмент от модели: {}", call.name)
+            tool_results.append(
+                {
+                    "type": "tool_result",
+                    "tool_use_id": call.id,
+                    "is_error": True,
+                    "content": "Неизвестный инструмент.",
+                }
             )
-            raise AgentError(f"PostDraft не прошёл валидацию после ретрая: {e2}") from e2
+
+        messages.append({"role": "user", "content": tool_results})
+
+    raise AgentError("Превышен лимит итераций агента без результата")
 
 
 async def _cli() -> None:
