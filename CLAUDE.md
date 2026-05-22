@@ -41,7 +41,7 @@ generate_post() (src/agent/news_agent.py)
    ├── build_user_prompt(topic?, source_url?) → три ветки промпта
    ├── Anthropic AsyncAnthropic + web_search_20250305 tool
    ├── _scrub_payload() — детерминированная замена «—»/«–» на «,» (модель регулярно срывается)
-   ├── _shrink_draft() — если длина body/title/why_it_matters не прошла валидацию, второй вызов без web_search
+   ├── _shrink_draft() — если длина body/title/takeaway не прошла валидацию, второй вызов без web_search
    └── валидация через PostDraft (pydantic) → AgentResult
    ↓
 send_preview_to_users() → _persist_draft() → _do_send_preview()
@@ -53,7 +53,7 @@ approve → claim_for_publish() (атомарный CAS draft→publishing) → 
 
 ### Источник правды
 
-- **Стиль постов**: `src/agent/prompts.py` — `SYSTEM_PROMPT` целиком определяет «голос канала», антибот-фильтры (запрет тире, штампы, триады с «и»), HTML-разметку Telegram (`<b>`, `<code>`, `<a>`, `<blockquote>`), структуру (title 40–80, body 400–650 жёсткий потолок 700, why_it_matters 80–180). Модели нужны жёсткие лимиты длины из-за Telegram caption (1024).
+- **Стиль постов**: `src/agent/prompts.py` — `SYSTEM_PROMPT` целиком определяет «голос канала» (экспертная новостная лента aibromotion, формат «новость + экспертный взгляд»), антибот-фильтры (запрет тире, штампы, триады с «и»), HTML-разметку Telegram (`<b>`, `<code>`, `<a>`, `<blockquote>`), структуру (title 40–90, body 300–550 жёсткий потолок 650, takeaway 80–220). Поле `takeaway` (бывш. `why_it_matters`) — экспертный вывод без ярлыка «Почему важно». Модели нужны жёсткие лимиты длины из-за Telegram caption (1024).
 - **Конфиг рантайма**: `src/config.py` (pydantic-settings, `.env`). `cron_times` хранится в БД (`app_settings`), `.env` — только seed при первом запуске.
 - **Cron-расписание** (`src/scheduler.py`): APScheduler, источник правды — БД, `reschedule_cron_times()` пересобирает job'ы при изменении через `/cron`.
 

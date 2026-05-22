@@ -46,7 +46,7 @@ def _strip_dashes(text: str) -> str:
 
 def _scrub_payload(payload: dict) -> dict:
     """Прогоняет текстовые поля черновика через _strip_dashes."""
-    for key in ("title", "body", "why_it_matters"):
+    for key in ("title", "body", "takeaway"):
         if isinstance(payload.get(key), str):
             payload[key] = _strip_dashes(payload[key])
     return payload
@@ -124,28 +124,43 @@ async def _shrink_draft(
     черновик, новые факты искать не надо. Это и быстрее, и не тратит лимиты.
     """
     fix_prompt = (
+        "Это чисто техническая правка уже принятого черновика. НЕ оценивай "
+        "релевантность темы и НЕ отказывайся: тема могла быть задана "
+        "пользователем вручную, ограничения тематики канала здесь не "
+        "применяются. Твоя единственная задача, привести длины полей к "
+        "лимитам. Всегда возвращай JSON, никаких отказов и пояснений прозой.\n\n"
         "Черновик поста не прошёл валидацию pydantic. Ошибки:\n"
         + "\n".join(f"- {e}" for e in errors)
         + "\n\nТекущий JSON:\n"
         + json.dumps(payload, ensure_ascii=False, indent=2)
         + "\n\nИсправь длины полей:\n"
-        "- body: 400–650 символов (жёсткий потолок 700), считая HTML-теги;\n"
-        "- title: 40–80 символов;\n"
-        "- why_it_matters: 80–180 символов.\n"
+        "- body: 300–550 символов (жёсткий потолок 650), считая HTML-теги;\n"
+        "- title: 40–90 символов;\n"
+        "- takeaway: 80–220 символов.\n"
         "Сохрани смысл, HTML-разметку, primary_source_url и extra_sources.\n"
         "Не добавляй новые факты, не используй «—» и «–».\n"
         "Верни ТОЛЬКО исправленный JSON без markdown-обёртки."
     )
 
+    # max_tokens как у основного вызова: при 2048 модель иногда добавляет
+    # вступление перед JSON, ответ обрывается на max_tokens, и JSON остаётся
+    # без закрывающей скобки. Тогда _extract_json не находит блок.
     response = await client.messages.create(
         model=settings.anthropic_model,
-        max_tokens=2048,
+        max_tokens=4096,
         system=SYSTEM_PROMPT,
         messages=[{"role": "user", "content": fix_prompt}],
     )
     await _log_and_record_usage(settings.anthropic_model, response.usage)
     text = _final_text(response.content)
-    return _extract_json(text)
+    result = _extract_json(text)
+    if result is None:
+        logger.error(
+            "Shrink retry: JSON не извлечён. stop_reason={}, текст: {}",
+            response.stop_reason,
+            text[:500],
+        )
+    return result
 
 
 async def generate_post(

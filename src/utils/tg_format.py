@@ -34,7 +34,7 @@ def format_post(draft: PostDraft) -> str:
     """Готовый HTML-текст поста для Telegram."""
     title = escape(draft.title.strip())
     body = _sanitize_body(draft.body.strip())
-    why = escape(draft.why_it_matters.strip())
+    why = escape(draft.takeaway.strip())
     source = escape(str(draft.primary_source_url))
 
     parts = [

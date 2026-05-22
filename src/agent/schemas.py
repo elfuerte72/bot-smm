@@ -11,9 +11,13 @@ class PostDraft(BaseModel):
     photo+caption.
     """
 
-    title: str = Field(..., min_length=10, max_length=120)
-    body: str = Field(..., min_length=200, max_length=750)
-    why_it_matters: str = Field(..., min_length=20, max_length=220)
+    # min_length — нижний предел валидности (защита от обрезков), а не
+    # стилевой таргет. Целевые длины (title 40–90, body 300–550,
+    # takeaway 80–220) задаёт SYSTEM_PROMPT. Слишком высокий min отбивал бы
+    # нормальные короткие посты в _shrink_draft без нужды.
+    title: str = Field(..., min_length=25, max_length=110)
+    body: str = Field(..., min_length=200, max_length=680)
+    takeaway: str = Field(..., min_length=60, max_length=260)
     primary_source_url: HttpUrl
     extra_sources: list[HttpUrl] = Field(default_factory=list)
 
