@@ -40,6 +40,31 @@ from src.utils.tg_format import (
 
 router = Router()
 
+# Жёсткий cap на длину текста при ручной правке. Telegram caption-лимит — 1024,
+# но edited-payload хранит old+new+diff, поэтому даём небольшой запас.
+_EDIT_TEXT_MAX_LEN = 4000
+
+
+async def _audit(
+    draft_id: int,
+    event_type: str,
+    *,
+    actor_user_id: int | None,
+    payload: dict[str, object] | None = None,
+) -> None:
+    """Fail-soft обёртка над repo.record_draft_event.
+
+    Audit — best-effort: если запись в БД упала (БД заблокирована, диск умер
+    и т.п.), пользовательский flow не должен падать с InternalError. Логируем
+    exception и едем дальше. Все 5 audit-точек в handlers идут через эту функцию.
+    """
+    try:
+        await repo.record_draft_event(
+            draft_id, event_type, actor_user_id=actor_user_id, payload=payload
+        )
+    except Exception:  # noqa: BLE001
+        logger.exception("audit: failed to record {} for draft {}", event_type, draft_id)
+
 
 class EditState(StatesGroup):
     waiting_for_text = State()
@@ -472,7 +497,7 @@ async def cb_approve(cq: CallbackQuery) -> None:
         tg_message_id=sent.message_id,
     )
     actor_id = cq.from_user.id if cq.from_user else None
-    await repo.record_draft_event(
+    await _audit(
         draft_id,
         "approved",
         actor_user_id=actor_id,
@@ -504,7 +529,7 @@ async def cb_regenerate(cq: CallbackQuery) -> None:
         return
 
     actor_id = cq.from_user.id if cq.from_user else None
-    await repo.record_draft_event(
+    await _audit(
         draft_id,
         "rejected",
         actor_user_id=actor_id,
@@ -542,20 +567,36 @@ async def cb_regenerate(cq: CallbackQuery) -> None:
 
     await status.delete()
     bot = cq.bot
-    if bot is not None:
-        new_draft_id = await send_preview_to_users(
+    if bot is None:
+        return
+    try:
+        new_draft_id, sent_count = await send_preview_to_users(
             bot,
             result,
             chat_ids=[cq.message.chat.id],
             actor_user_id=actor_id,
             gen_mode="auto",
         )
-        await repo.record_draft_event(
-            draft_id,
-            "regenerated_from",
-            actor_user_id=actor_id,
-            payload={"new_draft_id": new_draft_id, "new_title": result.title},
+    except Exception as e:  # noqa: BLE001
+        logger.exception("regenerate: send_preview_to_users failed")
+        await cq.message.answer(f"Не удалось показать новый черновик: {e}")
+        return
+
+    if sent_count == 0:
+        # Persisted, но ни одному из chat_ids не доставлено: regenerated_from
+        # вешать смысла нет — пользователь не увидит результат.
+        await cq.message.answer(
+            "Новый черновик сохранён, но Telegram не принял превью. "
+            "Открой логи или попробуй снова."
         )
+        return
+
+    await _audit(
+        draft_id,
+        "regenerated_from",
+        actor_user_id=actor_id,
+        payload={"new_draft_id": new_draft_id, "new_title": result.title},
+    )
 
 
 @router.callback_query(F.data.startswith("edit:"))
@@ -596,7 +637,7 @@ async def cb_reject(cq: CallbackQuery) -> None:
         await _strip_keyboard(cq)
         return
     actor_id = cq.from_user.id if cq.from_user else None
-    await repo.record_draft_event(
+    await _audit(
         draft_id,
         "rejected",
         actor_user_id=actor_id,
@@ -622,6 +663,12 @@ async def on_edit_text(message: Message, state: FSMContext) -> None:
         return
 
     new_text = message.text.strip()
+    if len(new_text) > _EDIT_TEXT_MAX_LEN:
+        await message.answer(
+            f"Слишком длинно (>{_EDIT_TEXT_MAX_LEN} символов). Сократи или /cancel."
+        )
+        return
+
     old_text = draft.formatted_text
     diff_unified = "\n".join(
         unified_diff(
@@ -632,14 +679,14 @@ async def on_edit_text(message: Message, state: FSMContext) -> None:
             lineterm="",
         )
     )
+    await repo.update_draft_text(draft_id, new_text)
     actor_id = message.from_user.id if message.from_user else None
-    await repo.record_draft_event(
+    await _audit(
         draft_id,
         "edited",
         actor_user_id=actor_id,
         payload={"old_text": old_text, "new_text": new_text, "diff_unified": diff_unified},
     )
-    await repo.update_draft_text(draft_id, new_text)
 
     refreshed = await repo.get_draft(draft_id)
     if not refreshed or message.bot is None:
@@ -746,13 +793,14 @@ async def send_preview_to_users(
     actor_user_id: int | None,
     gen_mode: str,
     gen_topic: str | None = None,
-) -> int:
+) -> tuple[int, int]:
     """Сохраняет один draft и рассылает превью в каждый из chat_ids.
 
     Cron-сценарий шлёт обоим allowed-юзерам с одинаковым draft_id, чтобы
-    race-защита на approve работала через статус в БД. Возвращает draft_id,
-    чтобы вызвавший мог записать связанный audit-event (например
-    regenerated_from на старый драфт после успешной регенерации).
+    race-защита на approve работала через статус в БД. Возвращает
+    (draft_id, sent_count): первый — id персиста, второй — сколько чатов
+    реально получили превью (нужно вызывающему, чтобы решить, имеет ли
+    смысл писать связанные audit-события вроде regenerated_from).
     """
     persisted = await _persist_draft(
         draft,
@@ -762,6 +810,7 @@ async def send_preview_to_users(
     )
     image_file_id: str | None = None
     image_bytes_remaining = persisted.image_bytes
+    sent_count = 0
 
     for chat_id in chat_ids:
         try:
@@ -778,12 +827,13 @@ async def send_preview_to_users(
             logger.exception("Не удалось отправить превью chat_id={}", chat_id)
             continue
 
+        sent_count += 1
         if new_file_id and image_file_id is None:
             image_file_id = new_file_id
             image_bytes_remaining = None
             await repo.set_image_file_id(persisted.draft_id, new_file_id)
 
-    return persisted.draft_id
+    return persisted.draft_id, sent_count
 
 
 async def _persist_draft(
@@ -812,7 +862,7 @@ async def _persist_draft(
     }
     if gen_topic:
         created_payload["topic"] = gen_topic
-    await repo.record_draft_event(
+    await _audit(
         draft_id,
         "created",
         actor_user_id=actor_user_id,

@@ -1,5 +1,8 @@
 from __future__ import annotations
 
+from collections.abc import AsyncIterator
+from contextlib import asynccontextmanager
+
 import aiosqlite
 from loguru import logger
 
@@ -95,10 +98,10 @@ async def _ensure_column(
 async def init_db() -> None:
     settings.db_path.parent.mkdir(parents=True, exist_ok=True)
     async with aiosqlite.connect(settings.db_path, timeout=_BUSY_TIMEOUT_SEC) as conn:
-        # WAL — это per-database setting (хранится в заголовке файла), достаточно
-        # выставить один раз. synchronous=NORMAL даёт безопасный fsync на checkpoint
-        # вместо каждой транзакции. Под нашей нагрузкой (десятки коммитов в день)
-        # этого с запасом.
+        # WAL и synchronous=NORMAL — оба сохраняются в заголовке WAL/БД и
+        # действуют для всех будущих коннектов. foreign_keys — наоборот,
+        # connection-local, поэтому выставляется ещё и в get_conn().
+        await conn.execute("PRAGMA foreign_keys=ON")
         async with conn.execute("PRAGMA journal_mode=WAL") as cur:
             mode_row = await cur.fetchone()
         await conn.execute("PRAGMA synchronous=NORMAL")
@@ -112,11 +115,17 @@ async def init_db() -> None:
     )
 
 
-def get_conn() -> aiosqlite.Connection:
-    """Возвращает coroutine-объект (aiosqlite.connect) — используется через `async with`.
+@asynccontextmanager
+async def get_conn() -> AsyncIterator[aiosqlite.Connection]:
+    """Открывает SQLite-коннект с busy_timeout=10s и PRAGMA foreign_keys=ON.
 
-    `timeout` пробрасывается в sqlite3.connect и задаёт busy_timeout: сколько
-    SQLite ждёт write-lock до SQLITE_BUSY. В сочетании с WAL это устраняет
-    типичные конфликты между cron-job и FastAPI-читателями.
+    Используется как `async with get_conn() as conn`. FK включаются per-connection
+    (это не DB-level setting), иначе ON DELETE CASCADE на draft_events не
+    сработает. timeout пробрасывается в sqlite3.connect и задаёт busy_timeout.
     """
-    return aiosqlite.connect(settings.db_path, timeout=_BUSY_TIMEOUT_SEC)
+    conn = await aiosqlite.connect(settings.db_path, timeout=_BUSY_TIMEOUT_SEC)
+    try:
+        await conn.execute("PRAGMA foreign_keys=ON")
+        yield conn
+    finally:
+        await conn.close()

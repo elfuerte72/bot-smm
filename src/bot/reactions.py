@@ -4,9 +4,26 @@ from aiogram import Router
 from aiogram.types import MessageReactionCountUpdated
 from loguru import logger
 
+from src.config import settings
 from src.storage import repo
 
 router = Router()
+
+
+def _is_target_channel(event: MessageReactionCountUpdated) -> bool:
+    """Реакции пишем только из канала из настроек.
+
+    settings.channel_id может быть числовым id (`-1001234...`) или username
+    (`@channel`). Telegram присылает event.chat.id (числовой) и опционально
+    event.chat.username. Сравниваем обе формы — что подходит, то и считаем
+    нашим каналом.
+    """
+    expected = str(settings.channel_id)
+    if expected == str(event.chat.id):
+        return True
+    if event.chat.username and expected == f"@{event.chat.username}":
+        return True
+    return False
 
 
 def _serialize_reactions(event: MessageReactionCountUpdated) -> list[dict[str, object]]:
@@ -48,20 +65,31 @@ async def on_message_reaction_count(event: MessageReactionCountUpdated) -> None:
     Telegram присылает агрегаты (а не дельты), поэтому upsert полностью
     перезаписывает строку. Если бот ещё не админ канала или allowed_updates
     не содержит message_reaction_count, этот хендлер просто не вызовется.
+
+    OwnerOnlyMiddleware не покрывает message_reaction_count observer (он
+    только на dp.message/dp.callback_query), и у event нет from_user.
+    Авторизация здесь — фильтр по chat.id канала из settings.
     """
+    if not _is_target_channel(event):
+        logger.debug(
+            "reactions: ignore foreign chat id={} username={}",
+            event.chat.id,
+            event.chat.username,
+        )
+        return
+
     reactions = _serialize_reactions(event)
-    total = sum(int(r.get("count", 0) or 0) for r in reactions)
-    channel_id = str(event.chat.id)
+    total = sum(int(r["count"]) for r in reactions)
 
     await repo.upsert_post_reactions(
         tg_message_id=event.message_id,
-        channel_id=channel_id,
+        channel_id=str(event.chat.id),
         total_count=total,
         reactions=reactions,
     )
     logger.debug(
         "reactions upsert: chat={} msg={} total={} reactions={}",
-        channel_id,
+        event.chat.id,
         event.message_id,
         total,
         reactions,
