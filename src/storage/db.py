@@ -5,6 +5,10 @@ from loguru import logger
 
 from src.config import settings
 
+# Таймаут на захват write-lock в SQLite. При WAL читатели не блокируют писателя,
+# но два писателя всё равно сериализуются — даём 10s на отстой перед SQLITE_BUSY.
+_BUSY_TIMEOUT_SEC = 10.0
+
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS drafts (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -45,6 +49,36 @@ CREATE TABLE IF NOT EXISTS api_usage (
     cost_usd REAL NOT NULL DEFAULT 0
 );
 CREATE INDEX IF NOT EXISTS idx_api_usage_ts ON api_usage(ts);
+
+CREATE TABLE IF NOT EXISTS draft_events (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    draft_id INTEGER NOT NULL REFERENCES drafts(id) ON DELETE CASCADE,
+    event_type TEXT NOT NULL,
+    actor_user_id INTEGER,
+    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    payload_json TEXT NOT NULL DEFAULT '{}'
+);
+CREATE INDEX IF NOT EXISTS idx_draft_events_draft ON draft_events(draft_id, created_at);
+CREATE INDEX IF NOT EXISTS idx_draft_events_type_at ON draft_events(event_type, created_at DESC);
+
+CREATE TABLE IF NOT EXISTS post_reactions (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    tg_message_id INTEGER NOT NULL,
+    channel_id TEXT NOT NULL,
+    total_count INTEGER NOT NULL DEFAULT 0,
+    reactions_json TEXT NOT NULL DEFAULT '[]',
+    updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    UNIQUE(tg_message_id, channel_id)
+);
+CREATE INDEX IF NOT EXISTS idx_post_reactions_total ON post_reactions(total_count DESC);
+
+CREATE TABLE IF NOT EXISTS channel_snapshots (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    ts TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    channel_id TEXT NOT NULL,
+    member_count INTEGER NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_channel_snapshots_ts ON channel_snapshots(channel_id, ts DESC);
 """
 
 
@@ -60,13 +94,29 @@ async def _ensure_column(
 
 async def init_db() -> None:
     settings.db_path.parent.mkdir(parents=True, exist_ok=True)
-    async with aiosqlite.connect(settings.db_path) as conn:
+    async with aiosqlite.connect(settings.db_path, timeout=_BUSY_TIMEOUT_SEC) as conn:
+        # WAL — это per-database setting (хранится в заголовке файла), достаточно
+        # выставить один раз. synchronous=NORMAL даёт безопасный fsync на checkpoint
+        # вместо каждой транзакции. Под нашей нагрузкой (десятки коммитов в день)
+        # этого с запасом.
+        async with conn.execute("PRAGMA journal_mode=WAL") as cur:
+            mode_row = await cur.fetchone()
+        await conn.execute("PRAGMA synchronous=NORMAL")
         await conn.executescript(SCHEMA)
         await _ensure_column(conn, "drafts", "image_file_id", "TEXT")
         await conn.commit()
-    logger.info("SQLite ready at {}", settings.db_path)
+    logger.info(
+        "SQLite ready at {} (journal_mode={})",
+        settings.db_path,
+        mode_row[0] if mode_row else "unknown",
+    )
 
 
 def get_conn() -> aiosqlite.Connection:
-    """Возвращает coroutine-объект (aiosqlite.connect) — используется через `async with`."""
-    return aiosqlite.connect(settings.db_path)
+    """Возвращает coroutine-объект (aiosqlite.connect) — используется через `async with`.
+
+    `timeout` пробрасывается в sqlite3.connect и задаёт busy_timeout: сколько
+    SQLite ждёт write-lock до SQLITE_BUSY. В сочетании с WAL это устраняет
+    типичные конфликты между cron-job и FastAPI-читателями.
+    """
+    return aiosqlite.connect(settings.db_path, timeout=_BUSY_TIMEOUT_SEC)

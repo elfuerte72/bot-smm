@@ -344,3 +344,83 @@ async def find_similar_topics(headline: str, *, days: int = 14, limit: int = 5) 
             break
 
     return matches
+
+
+# ──────────────────────────────────────────────────────────────────────────────
+# Audit events на драфтах (Task 2 spec): created/edited/regenerated_from/
+# approved/rejected. Payload-форма зафиксирована в docs/spec/mini-app.md.
+# ──────────────────────────────────────────────────────────────────────────────
+
+
+async def record_draft_event(
+    draft_id: int,
+    event_type: str,
+    *,
+    actor_user_id: int | None,
+    payload: dict[str, object] | None = None,
+) -> int:
+    """Пишет одну строку в draft_events. Возвращает id записи.
+
+    actor_user_id=None означает событие от cron/системы.
+    payload сериализуется в JSON (ensure_ascii=False — русский читаемо в SELECT).
+    """
+    body = json.dumps(payload or {}, ensure_ascii=False)
+    async with get_conn() as conn:
+        cur = await conn.execute(
+            """
+            INSERT INTO draft_events (draft_id, event_type, actor_user_id, payload_json)
+            VALUES (?, ?, ?, ?)
+            """,
+            (draft_id, event_type, actor_user_id, body),
+        )
+        await conn.commit()
+        return cur.lastrowid or 0
+
+
+# ──────────────────────────────────────────────────────────────────────────────
+# Реакции на опубликованные посты (Task 3 spec).
+# ──────────────────────────────────────────────────────────────────────────────
+
+
+async def upsert_post_reactions(
+    *,
+    tg_message_id: int,
+    channel_id: str,
+    total_count: int,
+    reactions: list[dict[str, object]],
+) -> None:
+    """Идемпотентный upsert агрегата реакций по (tg_message_id, channel_id).
+
+    Telegram присылает MessageReactionCountUpdated со снапшотом текущих
+    счётчиков, поэтому всегда перезаписываем total_count/reactions_json
+    целиком, не инкрементально.
+    """
+    body = json.dumps(reactions, ensure_ascii=False)
+    async with get_conn() as conn:
+        await conn.execute(
+            """
+            INSERT INTO post_reactions (tg_message_id, channel_id, total_count, reactions_json)
+            VALUES (?, ?, ?, ?)
+            ON CONFLICT(tg_message_id, channel_id) DO UPDATE SET
+                total_count = excluded.total_count,
+                reactions_json = excluded.reactions_json,
+                updated_at = CURRENT_TIMESTAMP
+            """,
+            (tg_message_id, channel_id, total_count, body),
+        )
+        await conn.commit()
+
+
+# ──────────────────────────────────────────────────────────────────────────────
+# Снапшоты подписчиков (Task 4 spec, функция готова заранее, чтобы не дробить
+# repo.py по таскам; вызывать её начнёт scheduler в Task 4).
+# ──────────────────────────────────────────────────────────────────────────────
+
+
+async def add_channel_snapshot(*, channel_id: str, member_count: int) -> None:
+    async with get_conn() as conn:
+        await conn.execute(
+            "INSERT INTO channel_snapshots (channel_id, member_count) VALUES (?, ?)",
+            (channel_id, member_count),
+        )
+        await conn.commit()
