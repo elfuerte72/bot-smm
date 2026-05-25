@@ -12,6 +12,7 @@ from loguru import logger
 
 from src.bot.handlers import router as bot_router
 from src.bot.middleware import OwnerOnlyMiddleware
+from src.bot.reactions import router as reactions_router
 from src.config import settings
 from src.scheduler import build_scheduler, set_scheduler
 from src.storage.db import init_db
@@ -38,6 +39,7 @@ async def main() -> None:
     dp.callback_query.middleware(owner_mw)
 
     dp.include_router(bot_router)
+    dp.include_router(reactions_router)
 
     me = await bot.get_me()
     logger.info(
@@ -60,8 +62,14 @@ async def main() -> None:
     set_scheduler(scheduler, bot)
     scheduler.start()
 
+    # message_reaction_count по умолчанию НЕ присылается через getUpdates,
+    # нужно явно перечислить allowed_updates. resolve_used_update_types
+    # автоматически добавит его, увидев reactions_router.
+    allowed_updates = dp.resolve_used_update_types()
+    logger.info("polling allowed_updates: {}", allowed_updates)
+
     try:
-        await dp.start_polling(bot)
+        await dp.start_polling(bot, allowed_updates=allowed_updates)
     finally:
         scheduler.shutdown(wait=False)
         await bot.session.close()
