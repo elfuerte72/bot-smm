@@ -446,11 +446,15 @@ def _period_clause(period: str) -> str | None:
     return _PERIOD_TO_SQLITE.get(period)
 
 
-_VALID_STATUSES = {"draft", "publishing", "published", "rejected"}
+_VALID_STATUSES: tuple[str, ...] = ("draft", "publishing", "published", "rejected")
 
 
 async def posts_stats() -> dict[str, int]:
-    """Возвращает counts по статусам + total. Используется /api/posts/stats."""
+    """Возвращает counts по статусам + total. Используется /api/posts/stats.
+
+    Порядок ключей в ответе детерминированный — `_VALID_STATUSES` кортеж,
+    не set: фронт может полагаться на порядок (хотя сейчас сортирует сам).
+    """
     counts: dict[str, int] = {s: 0 for s in _VALID_STATUSES}
     async with get_conn() as conn:
         async with conn.execute(
@@ -498,6 +502,10 @@ async def list_posts(
 
     where_sql = ("WHERE " + " AND ".join(where)) if where else ""
 
+    # GROUP BY d.id защищает от дубликации, если у одного draft почему-то
+    # окажется >1 строки в `published` (FK без UNIQUE на draft_id — латентный
+    # риск). MIN/MAX для скаляров и MAX для total_count — нейтральные агрегаты:
+    # в normal flow это один-к-одному, и MIN==MAX==единственное значение.
     select_sql = f"""
         SELECT
             d.id,
@@ -506,19 +514,23 @@ async def list_posts(
             d.primary_source_url,
             json_extract(d.raw_json, '$.title') AS draft_title,
             d.formatted_text,
-            p.tg_message_id,
-            p.published_at,
-            p.title AS published_title,
-            pr.total_count
+            MIN(p.tg_message_id) AS tg_message_id,
+            MIN(p.published_at) AS published_at,
+            MIN(p.title) AS published_title,
+            MAX(pr.total_count) AS total_reactions
         FROM drafts d
         LEFT JOIN published p ON p.draft_id = d.id
         LEFT JOIN post_reactions pr ON pr.tg_message_id = p.tg_message_id
         {where_sql}
+        GROUP BY d.id
         ORDER BY d.created_at DESC
         LIMIT ? OFFSET ?
     """
+    # COUNT(DISTINCT d.id) парная защита: даже если JOIN надувает строки,
+    # COUNT(*) дал бы завышенный total — DISTINCT сводит к числу уникальных
+    # драфтов, проходящих под фильтры.
     count_sql = f"""
-        SELECT COUNT(*)
+        SELECT COUNT(DISTINCT d.id)
         FROM drafts d
         LEFT JOIN published p ON p.draft_id = d.id
         {where_sql}

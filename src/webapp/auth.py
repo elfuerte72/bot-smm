@@ -20,12 +20,17 @@ def validate_init_data(init_data: str) -> dict[str, object]:
     HMAC-SHA256 считается по ADMIN_BOT_TOKEN — это бот, через которого
     открыт Mini App. Spec: https://core.telegram.org/bots/webapps
 
-    Шаги (в порядке отказа):
-      1) init_data не пуст;
+    Порядок проверок (важен — defense in depth по timing):
+      1) init_data не пуст и токен бота сконфигурирован;
       2) поле `hash` присутствует;
-      3) поле `auth_date` свежее (< 24ч);
-      4) HMAC совпадает (constant-time через ``hmac.compare_digest``);
+      3) HMAC совпадает (constant-time через ``hmac.compare_digest``);
+      4) `auth_date` свежее (< 24ч);
       5) `user.id` входит в ``settings.allowed_user_ids``.
+
+    HMAC сравнивается ДО парсинга `auth_date` и `user`, чтобы атакующий
+    не мог по тайминг-разнице отличить «битый auth_date» от «битый HMAC»
+    — оба теперь стоят одинаково (compare_digest всегда). Это гипотетический
+    вектор (auth_date публичен в WebApp), но цена меры — ноль.
     """
     if not init_data:
         raise HTTPException(status.HTTP_401_UNAUTHORIZED, "empty init_data")
@@ -35,18 +40,15 @@ def validate_init_data(init_data: str) -> dict[str, object]:
         logger.error("ADMIN_BOT_TOKEN не задан, отклоняю initData")
         raise HTTPException(status.HTTP_401_UNAUTHORIZED, "admin bot not configured")
 
+    # parse_qsl декодирует %XX (в т.ч. %0A → \n) в values. Это могло бы
+    # обмануть data_check_string, НО подделать HMAC без знания ADMIN_BOT_TOKEN
+    # атакующий не может — поэтому любые манипуляции с payload отвалятся на
+    # compare_digest ниже. Инвариант: всё, что прошло HMAC, ≡ тому, что
+    # Telegram сам подписал.
     pairs = dict(parse_qsl(init_data, keep_blank_values=True))
     received_hash = pairs.pop("hash", None)
     if not received_hash:
         raise HTTPException(status.HTTP_401_UNAUTHORIZED, "no hash")
-
-    auth_date_raw = pairs.get("auth_date", "0")
-    try:
-        auth_date = int(auth_date_raw)
-    except ValueError as e:
-        raise HTTPException(status.HTTP_401_UNAUTHORIZED, "bad auth_date") from e
-    if auth_date <= 0 or time.time() - auth_date > _INIT_DATA_TTL_SEC:
-        raise HTTPException(status.HTTP_401_UNAUTHORIZED, "init_data expired")
 
     data_check_string = "\n".join(f"{k}={v}" for k, v in sorted(pairs.items()))
     secret_key = hmac.new(
@@ -57,6 +59,16 @@ def validate_init_data(init_data: str) -> dict[str, object]:
     ).hexdigest()
     if not hmac.compare_digest(calc_hash, received_hash):
         raise HTTPException(status.HTTP_401_UNAUTHORIZED, "bad hash")
+
+    # HMAC валиден — payload подписан Telegram'ом. Дальше проверяем
+    # бизнес-смысл (свежесть, whitelist).
+    auth_date_raw = pairs.get("auth_date", "0")
+    try:
+        auth_date = int(auth_date_raw)
+    except ValueError as e:
+        raise HTTPException(status.HTTP_401_UNAUTHORIZED, "bad auth_date") from e
+    if auth_date <= 0 or time.time() - auth_date > _INIT_DATA_TTL_SEC:
+        raise HTTPException(status.HTTP_401_UNAUTHORIZED, "init_data expired")
 
     user_raw = pairs.get("user")
     if not user_raw:

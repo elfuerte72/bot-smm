@@ -23,7 +23,13 @@ async def get_posts_stats(user: CurrentUser) -> dict[str, int]:
 @router.get("/posts")
 async def list_posts(
     user: CurrentUser,
-    status: str | None = Query(default=None, pattern="^(draft|publishing|published|rejected)$"),
+    # alias="status" сохраняет публичный API ?status=... — параметр
+    # внутри функции переименован, чтобы не шэдоить `from fastapi import status`.
+    status_filter: str | None = Query(
+        default=None,
+        alias="status",
+        pattern="^(draft|publishing|published|rejected)$",
+    ),
     period: str = Query(default="all", pattern="^(24h|7d|30d|all)$"),
     search: str | None = Query(default=None, max_length=200),
     offset: int = Query(default=0, ge=0, le=10_000),
@@ -36,7 +42,7 @@ async def list_posts(
     pagination — limit 1..100, offset 0..10000 (защита от подбора).
     """
     items, total = await repo.list_posts(
-        status=status,
+        status=status_filter,
         period=period,
         search=search,
         offset=offset,

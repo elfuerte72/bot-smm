@@ -174,10 +174,14 @@ def _schedule_channel_snapshot(scheduler: AsyncIOScheduler, bot: Bot) -> None:
         logger.info("channel_snapshot: отключён (interval={} <= 0)", interval_min)
         return
 
+    # IntervalTrigger срабатывает раз в N минут wall-clock — таймзона ему
+    # не нужна (она релевантна только для start_date/end_date в cron-формате).
+    # next_run_time=datetime.now(tz) даёт первый запуск «сейчас», APScheduler
+    # нормализует к UTC внутренне.
     tz = _resolve_tz()
     scheduler.add_job(
         channel_snapshot,
-        trigger=IntervalTrigger(minutes=interval_min, timezone=tz),
+        trigger=IntervalTrigger(minutes=interval_min),
         kwargs={"bot": bot},
         id=_SNAPSHOT_JOB_ID,
         replace_existing=True,
