@@ -13,7 +13,7 @@
 | 3 | reaction handler + allowed_updates | ✅ DONE | `d23d4bb`, `76a3dc1` (chat-id filter) |
 | 4 | channel snapshot scheduler job | ✅ DONE | `7950626` |
 | 5 | FastAPI skeleton + auth | ✅ DONE | `5d5b31b` |
-| 6 | FastAPI: posts/channel/reactions routes | ⏳ TODO | — |
+| 6 | FastAPI: posts/channel/reactions routes | ✅ DONE | `d878a5c` |
 | 7 | admin bot | ⏳ TODO | — |
 | 8 | TaskGroup-оркестрация в main.py | ⏳ TODO | — |
 | 9 | frontend bootstrap | ⏳ TODO | — |
@@ -633,10 +633,16 @@ await conn.execute("PRAGMA synchronous=NORMAL")
   - `server.build_webapp` отключает `/docs`, `/redoc`, `/openapi.json` (внутренний инструмент, схема не нужна).
   - SPA-static/assets-mount условный: `src/webapp/static/` есть только после Vite build в multi-stage Docker, в dev фронт идёт через `vite dev` на :5173.
 
-### Task 6: FastAPI — posts/channel/reactions routes
+### Task 6: FastAPI — posts/channel/reactions routes — ✅ DONE (`d878a5c`)
 - **Acceptance:** все 8 эндпоинтов отвечают 200 с корректной схемой; SQL — параметризованный, нет инъекций; ответ для `/api/posts/stats` совпадает с прямым SQL `GROUP BY status`.
-- **Verify:** `curl -H "X-Telegram-Init-Data: $(scripts/sign_init_data.py 12345)" :8000/api/posts/stats` → counts; то же для остальных 7. SQL-инъекция в `search=' OR 1=1 --` не падает и не выдаёт всё.
-- **Files:** `src/webapp/routes/{posts,channel,reactions}.py`, `src/storage/repo.py` (расширение).
+- **Verify:** TestClient прогнал 15 кейсов — stats/list/detail/top/bottom/channel + SQL-injection probe (`search=' OR 1=1 --` → 0 строк), 404, 405, 401 без auth, 422 на bad-status/limit=0. Все зелёные.
+- **Files:** `src/webapp/routes/{posts,channel,reactions}.py`, `src/webapp/server.py`, `src/storage/repo.py` (+6 функций), `src/scheduler.py` (сохранение `channel_title`).
+- **Изменение vs первоначальный план:**
+  - Порядок `include_router` в `server.py`: reactions → posts. Иначе `/posts/reactions/top` ловится через `/posts/{draft_id}` и 422.
+  - `list_posts` использует `json_extract(d.raw_json, '$.title')` для поиска по черновикам (JSON1 встроен в SQLite на проде).
+  - Channel stats возвращает `member_count` из последнего snapshot, а не blocking-вызов `get_chat_member_count` — WebApp не должен синхронно дёргать Telegram на каждый запрос.
+  - `channel_snapshot` job дополнительно best-effort сохраняет `app_settings['channel_title']` — нужен `/api/channel/stats`. Сбой `get_chat` не валит snapshot.
+  - Все Query-параметры валидируются через pydantic (regex для status/period, `ge=/le=` для limit/offset/days) — bad-input отдаёт 422, защита от подбора через `limit ≤ 100`, `offset ≤ 10000`.
 
 ### Task 7: admin bot
 - **Acceptance:** `/start` отвечает с `ReplyKeyboardMarkup` + `KeyboardButton(web_app=...)`; неаутентифицированный юзер игнорируется (как в main-боте); menu button ставится best-effort.
