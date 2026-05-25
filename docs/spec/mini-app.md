@@ -11,9 +11,9 @@
 | 1 | расширение БД и WAL | ✅ DONE | `8948d5e` (taskwork), `76a3dc1` (FK ON fixup) |
 | 2 | audit-события в handlers | ✅ DONE | `c360fcf`, `76a3dc1` (fail-soft + порядок mutate→audit) |
 | 3 | reaction handler + allowed_updates | ✅ DONE | `d23d4bb`, `76a3dc1` (chat-id filter) |
-| 4 | channel snapshot scheduler job | ✅ DONE | `7950626` |
-| 5 | FastAPI skeleton + auth | ✅ DONE | `5d5b31b` |
-| 6 | FastAPI: posts/channel/reactions routes | ✅ DONE | `d878a5c` |
+| 4 | channel snapshot scheduler job | ✅ DONE | `7950626`, `859ce15` (review fixup) |
+| 5 | FastAPI skeleton + auth | ✅ DONE | `5d5b31b`, `859ce15` (HMAC порядок) |
+| 6 | FastAPI: posts/channel/reactions routes | ✅ DONE | `d878a5c`, `859ce15` (GROUP BY, status alias) |
 | 7 | admin bot | ✅ DONE | `8554ede` |
 | 8 | TaskGroup-оркестрация в main.py | ⏳ TODO | — |
 | 9 | frontend bootstrap | ⏳ TODO | — |
