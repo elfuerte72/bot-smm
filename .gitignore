@@ -23,3 +23,11 @@ build/
 htmlcov/
 .python-version
 .ipynb_checkpoints/
+
+# Frontend (Mini App)
+frontend/node_modules/
+frontend/dist/
+src/webapp/static/
+
+# Dev-only helpers с потенциально секретными токенами
+scripts/sign_init_data.py

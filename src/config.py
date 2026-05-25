@@ -54,6 +54,11 @@ class Settings(BaseSettings):
         60, alias="CHANNEL_SNAPSHOT_INTERVAL_MINUTES"
     )
 
+    admin_bot_token: str = Field("", alias="ADMIN_BOT_TOKEN")
+    mini_app_url: str = Field("", alias="MINI_APP_URL")
+    webapp_host: str = Field("0.0.0.0", alias="WEBAPP_HOST")
+    webapp_port: int = Field(8000, alias="WEBAPP_PORT")
+
     @field_validator("cron_times", mode="before")
     @classmethod
     def _split_times(cls, v: object) -> object:
