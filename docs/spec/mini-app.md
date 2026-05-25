@@ -1,20 +1,65 @@
 # Spec: Telegram Mini App — админская панель статистики SMM-бота
 
-> **Статус:** Phase 1 — Specify (на ревью).
+> **Статус:** Phase 3 — Implement. Tasks 1-3 готовы, Task 4-12 в очереди.
 > **Связан с:** Plan-файл `/Users/penkin/.claude/plans/mini-app-ethereal-kite.md`.
 > **История:** см. git log этого файла.
 
+## Прогресс реализации
+
+| # | Задача | Статус | Коммиты |
+|---|---|---|---|
+| 1 | расширение БД и WAL | ✅ DONE | `8948d5e` (taskwork), `76a3dc1` (FK ON fixup) |
+| 2 | audit-события в handlers | ✅ DONE | `c360fcf`, `76a3dc1` (fail-soft + порядок mutate→audit) |
+| 3 | reaction handler + allowed_updates | ✅ DONE | `d23d4bb`, `76a3dc1` (chat-id filter) |
+| 4 | channel snapshot scheduler job | ⏳ TODO | — |
+| 5 | FastAPI skeleton + auth | ⏳ TODO | — |
+| 6 | FastAPI: posts/channel/reactions routes | ⏳ TODO | — |
+| 7 | admin bot | ⏳ TODO | — |
+| 8 | TaskGroup-оркестрация в main.py | ⏳ TODO | — |
+| 9 | frontend bootstrap | ⏳ TODO | — |
+| 10 | frontend pages | ⏳ TODO | — |
+| 11 | Dockerfile multi-stage | ⏳ TODO | — |
+| 12 | deploy в Dokploy | ⏳ TODO | — |
+
+**Текущая БД-схема и runtime-поведение (актуально на момент Task 3+fixup):**
+- 7 таблиц (4 старых + `draft_events`, `post_reactions`, `channel_snapshots`).
+- `journal_mode=WAL`, `synchronous=NORMAL`, `busy_timeout=10s`.
+- `PRAGMA foreign_keys=ON` в каждом `get_conn()` (через `@asynccontextmanager`).
+- `record_draft_event` пишется во всех 5 точках спека через fail-soft `_audit()` helper в handlers.
+- Reactions handler фильтрует только канал из `settings.channel_id` (id или `@username`).
+- `send_preview_to_users` возвращает `(draft_id, sent_count)`; `cb_regenerate` пишет
+  `regenerated_from` только при `sent_count > 0`.
+
+### Что прочитать новой сессии перед продолжением
+
+1. Этот файл целиком — он же source of truth, обновляется при каждом изменении scope.
+2. `CLAUDE.md` (project root) — стиль кода, инварианты антибота, layered архитектура.
+3. `git log --oneline 87d5720..HEAD` — ровно те коммиты, что добавили mini-app слой.
+4. Перед стартом любой следующей таски — `uv run ruff check src/` и smoke по предыдущей таске
+   (см. **Verify**-блоки выше).
+
+### Незавершённые решения, нужные перед Task 4-12
+
+- **Task 4:** `CHANNEL_SNAPSHOT_INTERVAL_MINUTES` — рекомендация 60 мин на старте
+  (24 точки/день; вместе с 7-дневным окном даёт 168 точек на sparkline, нагрузка
+  на Bot API — копеечная). Альтернатива — 15 мин (96/день, 672/неделя), даёт
+  виднее микро-колебания, но шумит. Финального решения пользователя ещё нет —
+  спросить перед стартом Task 4.
+- **Task 5+:** домен Mini App и `ADMIN_BOT_TOKEN` (новый бот через @BotFather)
+  пока не созданы — это блокирует Task 7 (admin bot) и Task 12 (deploy).
+  См. **Open Questions** ниже.
+
 ## Объекты ревью
 
-- [ ] Объективы и пользовательские истории
-- [ ] Tech Stack и версии
-- [ ] Команды (build/dev/lint/test)
-- [ ] Структура проекта после изменений
-- [ ] Code Style (Python + TSX примеры)
-- [ ] Testing Strategy
-- [ ] Boundaries (Always/Ask first/Never)
-- [ ] Success Criteria — измеримые, testable
-- [ ] Open Questions — то, что нужно от пользователя
+- [x] Объективы и пользовательские истории
+- [x] Tech Stack и версии
+- [x] Команды (build/dev/lint/test)
+- [x] Структура проекта после изменений
+- [x] Code Style (Python + TSX примеры)
+- [x] Testing Strategy
+- [x] Boundaries (Always/Ask first/Never)
+- [x] Success Criteria — измеримые, testable
+- [x] Open Questions — то, что нужно от пользователя
 
 ## Допущения (assumptions)
 
@@ -543,20 +588,30 @@ await conn.execute("PRAGMA synchronous=NORMAL")
 
 ## Phase 3 — Tasks (ordered, with acceptance criteria)
 
-### Task 1: расширение БД и WAL
+### Task 1: расширение БД и WAL — ✅ DONE (`8948d5e`, `76a3dc1`)
 - **Acceptance:** новые таблицы `draft_events`, `post_reactions`, `channel_snapshots` созданы; `PRAGMA journal_mode` возвращает `wal`; существующие данные не повреждены.
 - **Verify:** удалить локальный `data/smm.db`, перезапустить, `sqlite3 data/smm.db ".schema"` показывает 7 таблиц. Запросить `PRAGMA journal_mode` — `wal`.
-- **Files:** `src/storage/db.py`, `src/storage/repo.py` (+8 функций).
+- **Files:** `src/storage/db.py`, `src/storage/repo.py` (+ `record_draft_event` / `upsert_post_reactions` / `add_channel_snapshot`).
+- **Изменение vs первоначальный план:** в fixup `76a3dc1` `get_conn()` переделан в `@asynccontextmanager` и каждый коннект ставит `PRAGMA foreign_keys=ON` — без этого `ON DELETE CASCADE` на `draft_events.draft_id` был бы no-op (SQLite по умолчанию не enforces FK).
 
-### Task 2: audit-события в handlers
+### Task 2: audit-события в handlers — ✅ DONE (`c360fcf`, `76a3dc1`)
 - **Acceptance:** в `draft_events` появляется запись при каждом из 5 действий; `actor_user_id` корректен (None для cron); diff в `edited` payload отличается от пустого.
 - **Verify:** сгенерировать `/generate auto` → отредактировать → одобрить → `SELECT * FROM draft_events WHERE draft_id=N ORDER BY id` — 3 строки `created/edited/approved` с корректным `actor`.
 - **Files:** `src/bot/handlers.py`, `src/scheduler.py` (передача `gen_mode="auto"`).
+- **Изменение vs первоначальный план:**
+  - Все 5 точек идут через fail-soft helper `_audit()` (handlers.py): exception в записи аудита логируется, но не валит пользовательский flow.
+  - В `on_edit_text` порядок mutate→audit: сначала `update_draft_text`, потом `_audit`, чтобы не оставалось фантомного `edited`-события при сбое update.
+  - `_EDIT_TEXT_MAX_LEN = 4000` — cap на длину текста при правке (Telegram caption 1024, но payload хранит old+new+diff, поэтому даём запас).
+  - `send_preview_to_users` теперь возвращает `(draft_id, sent_count)`; `cb_regenerate` пишет `regenerated_from` только при `sent_count > 0` и оборачивает send_preview в `try/except` с user-visible сообщением.
 
-### Task 3: reaction handler + allowed_updates
+### Task 3: reaction handler + allowed_updates — ✅ DONE (`d23d4bb`, `76a3dc1`)
 - **Acceptance:** `message_reaction_count` event → upsert в `post_reactions`; реакция от другого юзера на пост канала отражается в БД ≤ 2 мин.
 - **Verify:** опубликовать пост через бот → реагировать на него со второго аккаунта → `SELECT * FROM post_reactions WHERE tg_message_id=M` — строка с обновлённым `total_count`.
 - **Files:** `src/bot/reactions.py` (new), `src/main.py` (router include + `allowed_updates`).
+- **Изменение vs первоначальный план:**
+  - `_is_target_channel(event)` фильтрует только канал из `settings.channel_id`. Сравниваем и numeric id, и `@username` — формат настройки не фиксирован.
+  - `OwnerOnlyMiddleware` не покрывает `message_reaction_count` observer (он подключён только к `dp.message` / `dp.callback_query`). Это OK для анонимных реакций (нет `from_user`), но важно помнить, если в будущем добавим `message_reaction` (per-user).
+  - `allowed_updates` собирается через `dp.resolve_used_update_types()`, что делает список устойчивым к добавлению новых router'ов.
 
 ### Task 4: channel snapshot scheduler job
 - **Acceptance:** job запускается раз в `CHANNEL_SNAPSHOT_INTERVAL_MINUTES` минут (default 60); первая запись добавляется сразу при старте; `member_count` совпадает с `getChatMemberCount`.
