@@ -1,11 +1,13 @@
 from __future__ import annotations
 
 import re
+from datetime import datetime
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 from aiogram import Bot
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 from apscheduler.triggers.cron import CronTrigger
+from apscheduler.triggers.interval import IntervalTrigger
 from loguru import logger
 
 from src.agent.news_agent import AgentError, generate_post
@@ -15,6 +17,8 @@ from src.config import settings
 from src.storage import repo
 
 _HHMM_RE = re.compile(r"^([01]\d|2[0-3]):([0-5]\d)$")
+_CRON_JOB_PREFIX = "cron_generate_"
+_SNAPSHOT_JOB_ID = "channel_snapshot"
 
 _scheduler: AsyncIOScheduler | None = None
 _bot: Bot | None = None
@@ -92,10 +96,42 @@ async def cron_generate(bot: Bot) -> None:
     )
 
 
+async def channel_snapshot(bot: Bot) -> None:
+    """Снимок числа подписчиков канала. Пишется в channel_snapshots.
+
+    Источник — Bot API getChatMemberCount. Падение запроса логируем и
+    пропускаем итерацию: пропуск в sparkline лучше, чем падение всей
+    периодической задачи.
+    """
+    channel_id = settings.channel_id
+    try:
+        member_count = await bot.get_chat_member_count(channel_id)
+    except Exception:  # noqa: BLE001
+        logger.exception("channel_snapshot: getChatMemberCount failed for {}", channel_id)
+        return
+
+    try:
+        await repo.add_channel_snapshot(
+            channel_id=str(channel_id),
+            member_count=member_count,
+        )
+    except Exception:  # noqa: BLE001
+        logger.exception("channel_snapshot: add_channel_snapshot failed")
+        return
+
+    logger.info("channel_snapshot: {} → {}", channel_id, member_count)
+
+
 def _apply_times(scheduler: AsyncIOScheduler, bot: Bot, times: list[str]) -> list[str]:
-    """Снимает все cron-job'ы и заводит заново по списку HH:MM. Возвращает
-    фактически применённые (с фильтрацией некорректных значений)."""
-    scheduler.remove_all_jobs()
+    """Снимает все cron_generate-job'ы и заводит заново по списку HH:MM.
+
+    Удаляются только job'ы с id-префиксом ``cron_generate_`` — channel_snapshot
+    и любые другие фоновые задачи остаются на месте.
+    Возвращает фактически применённые (с фильтрацией некорректных значений).
+    """
+    for job in list(scheduler.get_jobs()):
+        if job.id.startswith(_CRON_JOB_PREFIX):
+            scheduler.remove_job(job.id)
     tz = _resolve_tz()
     applied: list[str] = []
     for hhmm in times:
@@ -108,13 +144,38 @@ def _apply_times(scheduler: AsyncIOScheduler, bot: Bot, times: list[str]) -> lis
             cron_generate,
             trigger=CronTrigger(hour=hour, minute=minute, timezone=tz),
             kwargs={"bot": bot},
-            id=f"cron_generate_{hour:02d}_{minute:02d}",
+            id=f"{_CRON_JOB_PREFIX}{hour:02d}_{minute:02d}",
             replace_existing=True,
             misfire_grace_time=300,
         )
         applied.append(f"{hour:02d}:{minute:02d}")
         logger.info("Запланировано: cron_generate ежедневно в {:02d}:{:02d} {}", hour, minute, tz)
     return applied
+
+
+def _schedule_channel_snapshot(scheduler: AsyncIOScheduler, bot: Bot) -> None:
+    """Регистрирует периодическую задачу снимков канала.
+
+    Первый запуск — сразу (``next_run_time=datetime.now(tz)``), далее раз в
+    ``CHANNEL_SNAPSHOT_INTERVAL_MINUTES``. Если интервал в конфиге <= 0,
+    job не регистрируется (выключено).
+    """
+    interval_min = settings.channel_snapshot_interval_minutes
+    if interval_min <= 0:
+        logger.info("channel_snapshot: отключён (interval={} <= 0)", interval_min)
+        return
+
+    tz = _resolve_tz()
+    scheduler.add_job(
+        channel_snapshot,
+        trigger=IntervalTrigger(minutes=interval_min, timezone=tz),
+        kwargs={"bot": bot},
+        id=_SNAPSHOT_JOB_ID,
+        replace_existing=True,
+        next_run_time=datetime.now(tz),
+        misfire_grace_time=120,
+    )
+    logger.info("Запланировано: channel_snapshot раз в {} мин (tz={})", interval_min, tz)
 
 
 async def build_scheduler(bot: Bot) -> AsyncIOScheduler:
@@ -133,6 +194,7 @@ async def build_scheduler(bot: Bot) -> AsyncIOScheduler:
         logger.info("Seeded cron_times из .env в БД: {}", times)
 
     _apply_times(scheduler, bot, times)
+    _schedule_channel_snapshot(scheduler, bot)
     return scheduler
 
 

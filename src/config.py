@@ -50,6 +50,10 @@ class Settings(BaseSettings):
     )
     cron_tz: str = Field("Europe/Moscow", alias="CRON_TZ")
 
+    channel_snapshot_interval_minutes: int = Field(
+        60, alias="CHANNEL_SNAPSHOT_INTERVAL_MINUTES"
+    )
+
     @field_validator("cron_times", mode="before")
     @classmethod
     def _split_times(cls, v: object) -> object:
