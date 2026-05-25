@@ -27,6 +27,7 @@ htmlcov/
 # Frontend (Mini App)
 frontend/node_modules/
 frontend/dist/
+frontend/*.tsbuildinfo
 src/webapp/static/
 
 # Dev-only helpers с потенциально секретными токенами

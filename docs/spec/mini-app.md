@@ -15,8 +15,8 @@
 | 5 | FastAPI skeleton + auth | ✅ DONE | `5d5b31b`, `859ce15` (HMAC порядок) |
 | 6 | FastAPI: posts/channel/reactions routes | ✅ DONE | `d878a5c`, `859ce15` (GROUP BY, status alias) |
 | 7 | admin bot | ✅ DONE | `8554ede` |
-| 8 | TaskGroup-оркестрация в main.py | ✅ DONE | (см. этот коммит) |
-| 9 | frontend bootstrap | ⏳ TODO | — |
+| 8 | TaskGroup-оркестрация в main.py | ✅ DONE | `75156aa` |
+| 9 | frontend bootstrap | ✅ DONE | (см. этот коммит) |
 | 10 | frontend pages | ⏳ TODO | — |
 | 11 | Dockerfile multi-stage | ⏳ TODO | — |
 | 12 | deploy в Dokploy | ⏳ TODO | — |
@@ -663,10 +663,15 @@ await conn.execute("PRAGMA synchronous=NORMAL")
   - `_install_signal_handlers` ловит и `SIGTERM` (Docker), и `SIGINT` (Ctrl+C). Повторный сигнал не дёргает второй shutdown — только лог.
   - uvicorn запущен через `Server(Config(...))` напрямую, без `run()`. `log_level` — lowercase из settings, `access_log=False`, чтобы не дублировать loguru.
 
-### Task 9: frontend bootstrap
+### Task 9: frontend bootstrap — ✅ DONE
 - **Acceptance:** `npm ci` устанавливает зависимости из lockfile; `npm run dev` поднимает Vite на :5173 с proxy `/api → :8000`; placeholder-страница рендерится.
-- **Verify:** `cd frontend && npm ci && npm run dev`, открыть `http://localhost:5173`, в DevTools — запрос на `/api/health` прокинут на :8000 и возвращает 200.
-- **Files:** `frontend/package.json`, `tsconfig.json`, `vite.config.ts`, `index.html`, `src/{main.tsx,App.tsx,api.ts,telegram.ts,styles.css}`.
+- **Verify:** `npm install` сгенерировал lockfile (225 пакетов); `npm run typecheck` зелёный; `npm run lint` зелёный; `npm run build` → 46.4 KB gz (с большим запасом до P1 = 200 KB gz); `npm run dev` → :5173 отдаёт index.html (HTTP 200), proxy `/api → :8000` сконфигурирован.
+- **Files:** `frontend/package.json`, `package-lock.json`, `tsconfig.{json,app,node}.json`, `vite.config.ts`, `eslint.config.js`, `index.html`, `src/{main.tsx,App.tsx,api.ts,telegram.ts,styles.css,vite-env.d.ts}`.
+- **Изменение vs первоначальный план:**
+  - Конфиг TS разбит на `tsconfig.app.json` (src/) + `tsconfig.node.json` (vite.config.ts) — стандартный шаблон Vite + React 18, чтобы Node-API в конфиге не пролезали в браузерный код.
+  - ESLint 9 flat config (`eslint.config.js`), без prettier — Open Question 6.
+  - В `styles.css` — CSS-переменные Telegram-темы (`--tg-bg`, `--tg-button` и т.п.), fallback на тёмные цвета (Telegram-default).
+  - Placeholder-страница App.tsx уже стучится в `/api/health` — это и есть live-проверка proxy.
 
 ### Task 10: frontend pages
 - **Acceptance:** 4 страницы (Posts, PostDetail, Channel, Reactions) функциональны на реальных данных; `npm run build` успешен; bundle ≤ 200KB gzipped; Telegram-тема применяется через CSS-vars.
