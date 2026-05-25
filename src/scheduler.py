@@ -83,7 +83,13 @@ async def cron_generate(bot: Bot) -> None:
         )
         return
 
-    await send_preview_to_users(bot, result, chat_ids=chat_ids)
+    await send_preview_to_users(
+        bot,
+        result,
+        chat_ids=chat_ids,
+        actor_user_id=None,
+        gen_mode="auto",
+    )
 
 
 def _apply_times(scheduler: AsyncIOScheduler, bot: Bot, times: list[str]) -> list[str]:

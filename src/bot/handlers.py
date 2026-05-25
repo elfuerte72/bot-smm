@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 from dataclasses import dataclass
 from datetime import UTC
+from difflib import unified_diff
 from urllib.parse import urlparse
 
 from aiogram import Bot, F, Router
@@ -470,6 +471,13 @@ async def cb_approve(cq: CallbackQuery) -> None:
         title=title,
         tg_message_id=sent.message_id,
     )
+    actor_id = cq.from_user.id if cq.from_user else None
+    await repo.record_draft_event(
+        draft_id,
+        "approved",
+        actor_user_id=actor_id,
+        payload={"tg_message_id": sent.message_id, "channel_id": str(settings.channel_id)},
+    )
     await _strip_keyboard(cq)
     await cq.answer("Опубликовано")
     await cq.message.answer(f"Пост #{sent.message_id} опубликован в канале.")
@@ -494,6 +502,14 @@ async def cb_regenerate(cq: CallbackQuery) -> None:
         await cq.answer("Уже обработано")
         await _strip_keyboard(cq)
         return
+
+    actor_id = cq.from_user.id if cq.from_user else None
+    await repo.record_draft_event(
+        draft_id,
+        "rejected",
+        actor_user_id=actor_id,
+        payload={"reason": "regenerate_replaced"},
+    )
 
     await cq.answer("Генерирую заново…")
     await _strip_keyboard(cq)
@@ -527,7 +543,19 @@ async def cb_regenerate(cq: CallbackQuery) -> None:
     await status.delete()
     bot = cq.bot
     if bot is not None:
-        await send_preview_to_users(bot, result, chat_ids=[cq.message.chat.id])
+        new_draft_id = await send_preview_to_users(
+            bot,
+            result,
+            chat_ids=[cq.message.chat.id],
+            actor_user_id=actor_id,
+            gen_mode="auto",
+        )
+        await repo.record_draft_event(
+            draft_id,
+            "regenerated_from",
+            actor_user_id=actor_id,
+            payload={"new_draft_id": new_draft_id, "new_title": result.title},
+        )
 
 
 @router.callback_query(F.data.startswith("edit:"))
@@ -567,6 +595,13 @@ async def cb_reject(cq: CallbackQuery) -> None:
         await cq.answer("Уже обработано")
         await _strip_keyboard(cq)
         return
+    actor_id = cq.from_user.id if cq.from_user else None
+    await repo.record_draft_event(
+        draft_id,
+        "rejected",
+        actor_user_id=actor_id,
+        payload={"reason": "manual_reject"},
+    )
     await _strip_keyboard(cq)
     await cq.answer("Отклонено")
 
@@ -587,6 +622,23 @@ async def on_edit_text(message: Message, state: FSMContext) -> None:
         return
 
     new_text = message.text.strip()
+    old_text = draft.formatted_text
+    diff_unified = "\n".join(
+        unified_diff(
+            old_text.splitlines(),
+            new_text.splitlines(),
+            fromfile="old",
+            tofile="new",
+            lineterm="",
+        )
+    )
+    actor_id = message.from_user.id if message.from_user else None
+    await repo.record_draft_event(
+        draft_id,
+        "edited",
+        actor_user_id=actor_id,
+        payload={"old_text": old_text, "new_text": new_text, "diff_unified": diff_unified},
+    )
     await repo.update_draft_text(draft_id, new_text)
 
     refreshed = await repo.get_draft(draft_id)
@@ -632,15 +684,18 @@ async def _run_generation(
 
     `topic` — пользовательская тема, перебивает AI-тематику системного промпта.
     `source_url` — прямой URL источника: бот пишет пост по содержимому статьи.
-    Для URL-режима фильтры по уже опубликованным URL/темам отключаем —
+    Для URL-режима фильтры по уже опубликованным URL/темам отключаем,
     пользователь явно выбрал источник.
     """
     if source_url:
         status_text = "Читаю статью и пишу пост…"
+        gen_mode = "url"
     elif topic:
         status_text = "Ищу инфоповод по теме и пишу пост…"
+        gen_mode = "topic"
     else:
         status_text = "Ищу инфоповод и пишу пост…"
+        gen_mode = "auto"
     status = await message.answer(status_text)
     try:
         if source_url:
@@ -671,8 +726,16 @@ async def _run_generation(
         return
 
     await status.delete()
+    actor_user_id = message.from_user.id if message.from_user else None
     if message.bot is not None:
-        await send_preview_to_users(message.bot, result, chat_ids=[message.chat.id])
+        await send_preview_to_users(
+            message.bot,
+            result,
+            chat_ids=[message.chat.id],
+            actor_user_id=actor_user_id,
+            gen_mode=gen_mode,
+            gen_topic=topic,
+        )
 
 
 async def send_preview_to_users(
@@ -680,13 +743,23 @@ async def send_preview_to_users(
     draft: PostDraft,
     *,
     chat_ids: list[int],
-) -> None:
+    actor_user_id: int | None,
+    gen_mode: str,
+    gen_topic: str | None = None,
+) -> int:
     """Сохраняет один draft и рассылает превью в каждый из chat_ids.
 
     Cron-сценарий шлёт обоим allowed-юзерам с одинаковым draft_id, чтобы
-    race-защита на approve работала через статус в БД.
+    race-защита на approve работала через статус в БД. Возвращает draft_id,
+    чтобы вызвавший мог записать связанный audit-event (например
+    regenerated_from на старый драфт после успешной регенерации).
     """
-    persisted = await _persist_draft(draft)
+    persisted = await _persist_draft(
+        draft,
+        actor_user_id=actor_user_id,
+        gen_mode=gen_mode,
+        gen_topic=gen_topic,
+    )
     image_file_id: str | None = None
     image_bytes_remaining = persisted.image_bytes
 
@@ -710,8 +783,16 @@ async def send_preview_to_users(
             image_bytes_remaining = None
             await repo.set_image_file_id(persisted.draft_id, new_file_id)
 
+    return persisted.draft_id
 
-async def _persist_draft(draft: PostDraft) -> _PersistedDraft:
+
+async def _persist_draft(
+    draft: PostDraft,
+    *,
+    actor_user_id: int | None,
+    gen_mode: str,
+    gen_topic: str | None,
+) -> _PersistedDraft:
     formatted = format_post(draft)
     source_urls = [str(draft.primary_source_url)] + [str(u) for u in draft.extra_sources]
     fetched = await fetch_best_image(source_urls)
@@ -722,6 +803,20 @@ async def _persist_draft(draft: PostDraft) -> _PersistedDraft:
         formatted_text=formatted,
         image_url=image_url,
         primary_source_url=str(draft.primary_source_url),
+    )
+
+    created_payload: dict[str, object] = {
+        "mode": gen_mode,
+        "source_url": str(draft.primary_source_url),
+        "title": draft.title,
+    }
+    if gen_topic:
+        created_payload["topic"] = gen_topic
+    await repo.record_draft_event(
+        draft_id,
+        "created",
+        actor_user_id=actor_user_id,
+        payload=created_payload,
     )
 
     return _PersistedDraft(
