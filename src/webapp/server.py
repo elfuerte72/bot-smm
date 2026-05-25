@@ -7,7 +7,7 @@ from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
 from loguru import logger
 
-from src.webapp.routes import health, me
+from src.webapp.routes import channel, health, me, posts, reactions
 
 # Папка собранного фронта (Vite build): создаётся multi-stage Dockerfile'ом.
 # В dev фронт поднимается отдельным процессом vite на :5173, и static может
@@ -33,6 +33,12 @@ def build_webapp() -> FastAPI:
 
     app.include_router(health.router, prefix="/api")
     app.include_router(me.router, prefix="/api")
+    # Reactions подключаем ДО posts: их пути /posts/reactions/{top,bottom}
+    # должны матчиться раньше /posts/{draft_id}, иначе FastAPI ловит 422
+    # при попытке распарсить "reactions" как int.
+    app.include_router(reactions.router, prefix="/api")
+    app.include_router(posts.router, prefix="/api")
+    app.include_router(channel.router, prefix="/api")
 
     if _STATIC_DIR.exists():
         assets_dir = _STATIC_DIR / "assets"

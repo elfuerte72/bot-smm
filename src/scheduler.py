@@ -101,7 +101,8 @@ async def channel_snapshot(bot: Bot) -> None:
 
     Источник — Bot API getChatMemberCount. Падение запроса логируем и
     пропускаем итерацию: пропуск в sparkline лучше, чем падение всей
-    периодической задачи.
+    периодической задачи. Параллельно best-effort обновляем
+    ``app_settings['channel_title']`` — нужен для /api/channel/stats.
     """
     channel_id = settings.channel_id
     try:
@@ -118,6 +119,14 @@ async def channel_snapshot(bot: Bot) -> None:
     except Exception:  # noqa: BLE001
         logger.exception("channel_snapshot: add_channel_snapshot failed")
         return
+
+    try:
+        chat = await bot.get_chat(channel_id)
+        if chat.title:
+            await repo.set_setting("channel_title", chat.title)
+    except Exception:  # noqa: BLE001
+        # title — best-effort, не должен валить snapshot
+        logger.warning("channel_snapshot: get_chat для title не удался")
 
     logger.info("channel_snapshot: {} → {}", channel_id, member_count)
 

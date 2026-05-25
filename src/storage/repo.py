@@ -424,3 +424,318 @@ async def add_channel_snapshot(*, channel_id: str, member_count: int) -> None:
             (channel_id, member_count),
         )
         await conn.commit()
+
+
+# ──────────────────────────────────────────────────────────────────────────────
+# Чтения для Mini App API (Task 6 spec).
+# ──────────────────────────────────────────────────────────────────────────────
+
+
+_PERIOD_TO_SQLITE = {
+    "24h": "-1 day",
+    "7d": "-7 day",
+    "30d": "-30 day",
+}
+
+
+def _period_clause(period: str) -> str | None:
+    """Возвращает SQLite-выражение для clause `created_at >= datetime(...)`
+    или None для 'all' / неизвестных значений (фолбэк → без фильтра)."""
+    if period == "all":
+        return None
+    return _PERIOD_TO_SQLITE.get(period)
+
+
+_VALID_STATUSES = {"draft", "publishing", "published", "rejected"}
+
+
+async def posts_stats() -> dict[str, int]:
+    """Возвращает counts по статусам + total. Используется /api/posts/stats."""
+    counts: dict[str, int] = {s: 0 for s in _VALID_STATUSES}
+    async with get_conn() as conn:
+        async with conn.execute(
+            "SELECT status, COUNT(*) FROM drafts GROUP BY status"
+        ) as cur:
+            async for row in cur:
+                counts[str(row[0])] = int(row[1])
+    counts["total"] = sum(counts.values())
+    return counts
+
+
+async def list_posts(
+    *,
+    status: str | None,
+    period: str,
+    search: str | None,
+    offset: int,
+    limit: int,
+) -> tuple[list[dict[str, object]], int]:
+    """Постраничный список постов с фильтрами. Возвращает (items, total).
+
+    Все параметры биндятся как `?`-плейсхолдеры — никаких форматных подстановок.
+    Поиск делается по `json_extract(drafts.raw_json, '$.title')` (для черновиков)
+    И по `published.title` (для уже опубликованных). LIKE с COLLATE NOCASE —
+    case-insensitive в ASCII; русский UTF-8 матчится через подстроку дословно.
+    """
+    where: list[str] = []
+    params: list[object] = []
+    if status and status in _VALID_STATUSES:
+        where.append("d.status = ?")
+        params.append(status)
+
+    period_expr = _period_clause(period)
+    if period_expr is not None:
+        where.append("d.created_at >= datetime('now', ?)")
+        params.append(period_expr)
+
+    if search:
+        like = f"%{search.strip()}%"
+        where.append(
+            "(COALESCE(json_extract(d.raw_json, '$.title'), '') LIKE ? COLLATE NOCASE"
+            " OR COALESCE(p.title, '') LIKE ? COLLATE NOCASE)"
+        )
+        params.extend([like, like])
+
+    where_sql = ("WHERE " + " AND ".join(where)) if where else ""
+
+    select_sql = f"""
+        SELECT
+            d.id,
+            d.created_at,
+            d.status,
+            d.primary_source_url,
+            json_extract(d.raw_json, '$.title') AS draft_title,
+            d.formatted_text,
+            p.tg_message_id,
+            p.published_at,
+            p.title AS published_title,
+            pr.total_count
+        FROM drafts d
+        LEFT JOIN published p ON p.draft_id = d.id
+        LEFT JOIN post_reactions pr ON pr.tg_message_id = p.tg_message_id
+        {where_sql}
+        ORDER BY d.created_at DESC
+        LIMIT ? OFFSET ?
+    """
+    count_sql = f"""
+        SELECT COUNT(*)
+        FROM drafts d
+        LEFT JOIN published p ON p.draft_id = d.id
+        {where_sql}
+    """
+
+    items: list[dict[str, object]] = []
+    async with get_conn() as conn:
+        async with conn.execute(select_sql, [*params, limit, offset]) as cur:
+            async for row in cur:
+                items.append(_row_to_post(row))
+        async with conn.execute(count_sql, params) as cur:
+            r = await cur.fetchone()
+            total = int(r[0]) if r else 0
+
+    return items, total
+
+
+def _row_to_post(row: tuple[object, ...]) -> dict[str, object]:
+    """Мап-функция из SQL-строки list_posts/get_post_detail в JSON-friendly dict."""
+    (
+        draft_id,
+        created_at,
+        status,
+        primary_source_url,
+        draft_title,
+        formatted_text,
+        tg_message_id,
+        published_at,
+        published_title,
+        total_reactions,
+    ) = row
+    title = (published_title or draft_title or "(без заголовка)").strip()
+    formatted = str(formatted_text or "")
+    preview = formatted[:200] + ("…" if len(formatted) > 200 else "")
+    return {
+        "id": int(draft_id) if draft_id is not None else 0,
+        "created_at": str(created_at) if created_at else None,
+        "status": str(status) if status else None,
+        "title": title,
+        "preview": preview,
+        "primary_source_url": str(primary_source_url) if primary_source_url else None,
+        "tg_message_id": int(tg_message_id) if tg_message_id is not None else None,
+        "published_at": str(published_at) if published_at else None,
+        "total_reactions": int(total_reactions) if total_reactions is not None else None,
+    }
+
+
+async def get_post_detail(draft_id: int) -> dict[str, object] | None:
+    """Полная карточка поста: draft + events[] + published? + reactions?.
+
+    Возвращает None, если draft с таким id не найден.
+    """
+    async with get_conn() as conn:
+        async with conn.execute(
+            """
+            SELECT
+                d.id,
+                d.created_at,
+                d.status,
+                d.primary_source_url,
+                json_extract(d.raw_json, '$.title') AS draft_title,
+                d.formatted_text,
+                p.tg_message_id,
+                p.published_at,
+                p.title AS published_title,
+                pr.total_count
+            FROM drafts d
+            LEFT JOIN published p ON p.draft_id = d.id
+            LEFT JOIN post_reactions pr ON pr.tg_message_id = p.tg_message_id
+            WHERE d.id = ?
+            """,
+            (draft_id,),
+        ) as cur:
+            row = await cur.fetchone()
+            if row is None:
+                return None
+            post = _row_to_post(row)
+
+        events: list[dict[str, object]] = []
+        async with conn.execute(
+            """
+            SELECT id, event_type, actor_user_id, created_at, payload_json
+            FROM draft_events
+            WHERE draft_id = ?
+            ORDER BY id ASC
+            """,
+            (draft_id,),
+        ) as cur:
+            async for ev in cur:
+                payload: object
+                try:
+                    payload = json.loads(ev[4]) if ev[4] else {}
+                except json.JSONDecodeError:
+                    payload = {}
+                events.append(
+                    {
+                        "id": int(ev[0]),
+                        "event_type": str(ev[1]),
+                        "actor_user_id": int(ev[2]) if ev[2] is not None else None,
+                        "created_at": str(ev[3]) if ev[3] else None,
+                        "payload": payload,
+                    }
+                )
+
+        reactions: dict[str, object] | None = None
+        tg_message_id = post.get("tg_message_id")
+        if tg_message_id is not None:
+            async with conn.execute(
+                """
+                SELECT total_count, reactions_json, updated_at
+                FROM post_reactions
+                WHERE tg_message_id = ?
+                """,
+                (tg_message_id,),
+            ) as cur:
+                r = await cur.fetchone()
+                if r is not None:
+                    try:
+                        breakdown = json.loads(r[1]) if r[1] else []
+                    except json.JSONDecodeError:
+                        breakdown = []
+                    reactions = {
+                        "total_count": int(r[0]),
+                        "reactions": breakdown,
+                        "updated_at": str(r[2]) if r[2] else None,
+                    }
+
+    return {"post": post, "events": events, "reactions": reactions}
+
+
+async def channel_snapshots(*, channel_id: str, days: int = 7) -> list[dict[str, object]]:
+    """Возвращает точки sparkline за N дней (ASC по ts — для прямой отрисовки)."""
+    async with get_conn() as conn:
+        async with conn.execute(
+            """
+            SELECT ts, member_count
+            FROM channel_snapshots
+            WHERE channel_id = ?
+              AND ts >= datetime('now', ?)
+            ORDER BY ts ASC
+            """,
+            (channel_id, f"-{int(days)} day"),
+        ) as cur:
+            return [
+                {"ts": str(row[0]), "member_count": int(row[1])}
+                async for row in cur
+            ]
+
+
+async def latest_member_count(channel_id: str) -> int | None:
+    """Последнее известное значение member_count из channel_snapshots."""
+    async with get_conn() as conn:
+        async with conn.execute(
+            """
+            SELECT member_count FROM channel_snapshots
+            WHERE channel_id = ? ORDER BY ts DESC LIMIT 1
+            """,
+            (channel_id,),
+        ) as cur:
+            row = await cur.fetchone()
+            return int(row[0]) if row else None
+
+
+async def top_reactions(*, limit: int = 10) -> list[dict[str, object]]:
+    """Топ постов по total_count DESC. Только опубликованные посты с реакциями."""
+    return await _reactions_list("DESC", limit=limit, min_age_hours=0)
+
+
+async def bottom_reactions(*, limit: int = 10) -> list[dict[str, object]]:
+    """Анти-топ постов по total_count ASC. Учитываем только опубликованные ≥ 24ч
+    назад: иначе свежие посты с 0 реакций забили бы выдачу."""
+    return await _reactions_list("ASC", limit=limit, min_age_hours=24)
+
+
+async def _reactions_list(
+    order: str, *, limit: int, min_age_hours: int
+) -> list[dict[str, object]]:
+    if order not in {"ASC", "DESC"}:
+        # Защита от случайного inject — никогда не должно случиться, всё внутри.
+        raise ValueError(f"bad order: {order}")
+    sql = f"""
+        SELECT
+            pr.tg_message_id,
+            pr.channel_id,
+            pr.total_count,
+            pr.reactions_json,
+            pr.updated_at,
+            p.title,
+            p.published_at,
+            p.draft_id
+        FROM post_reactions pr
+        INNER JOIN published p ON p.tg_message_id = pr.tg_message_id
+        WHERE p.published_at <= datetime('now', ?)
+        ORDER BY pr.total_count {order}
+        LIMIT ?
+    """
+    age_expr = f"-{int(min_age_hours)} hour"
+    async with get_conn() as conn:
+        async with conn.execute(sql, (age_expr, limit)) as cur:
+            rows = await cur.fetchall()
+
+    out: list[dict[str, object]] = []
+    for row in rows:
+        try:
+            breakdown = json.loads(row[3]) if row[3] else []
+        except json.JSONDecodeError:
+            breakdown = []
+        out.append(
+            {
+                "tg_message_id": int(row[0]),
+                "channel_id": str(row[1]),
+                "total_count": int(row[2]),
+                "reactions": breakdown,
+                "updated_at": str(row[4]) if row[4] else None,
+                "title": str(row[5]) if row[5] else "(без заголовка)",
+                "published_at": str(row[6]) if row[6] else None,
+                "draft_id": int(row[7]) if row[7] is not None else None,
+            }
+        )
+    return out
