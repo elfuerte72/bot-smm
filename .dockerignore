@@ -14,3 +14,14 @@ data/
 .DS_Store
 README.md
 .claude/
+
+# Frontend artefacts — пересобираются в stage 1
+frontend/node_modules/
+frontend/dist/
+frontend/*.tsbuildinfo
+
+# Python static (генерируется multi-stage из frontend/dist)
+src/webapp/static/
+
+# Локальные dev-скрипты
+scripts/sign_init_data.py

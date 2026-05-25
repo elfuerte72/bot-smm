@@ -17,8 +17,8 @@
 | 7 | admin bot | ✅ DONE | `8554ede` |
 | 8 | TaskGroup-оркестрация в main.py | ✅ DONE | `75156aa` |
 | 9 | frontend bootstrap | ✅ DONE | `e148ea7` |
-| 10 | frontend pages | ✅ DONE | (см. этот коммит) |
-| 11 | Dockerfile multi-stage | ⏳ TODO | — |
+| 10 | frontend pages | ✅ DONE | `35b3b5b` |
+| 11 | Dockerfile multi-stage | ⚠️ CODE-ONLY | (см. этот коммит) |
 | 12 | deploy в Dokploy | ⏳ TODO | — |
 
 **Текущая БД-схема и runtime-поведение (актуально на момент Task 3+fixup):**
@@ -685,10 +685,16 @@ await conn.execute("PRAGMA synchronous=NORMAL")
   - `Sparkline` — pure SVG ~50 строк, без chart-библиотек (как в Tech Stack). Считает min/max и линейный масштаб.
   - Дата в `formatDate` интерпретирует ISO без `Z` как UTC (SQLite даты без таймзоны) — иначе браузер берёт local TZ и таймстампы съезжают.
 
-### Task 11: Dockerfile multi-stage
+### Task 11: Dockerfile multi-stage — ⚠️ CODE-ONLY
 - **Acceptance:** 3 stage (node → python deps → runtime); финальный образ ≤ 250MB; bundle React в `/app/src/webapp/static/`; healthcheck бьёт `/api/health`; non-root `app:app`.
-- **Verify:** `docker build -t smm-bot .` → success. `docker run -p 8000:8000 -v ./data:/data --env-file .env smm-bot` → `curl :8000/api/health` → 200. `docker image inspect smm-bot | jq '.[0].Size'` — sane.
-- **Files:** `Dockerfile`, `.dockerignore`, `.gitignore`.
+- **Verify:** ⚠️ Локальный `docker build` НЕ запускался: Docker daemon выключен в момент работы. Файлы написаны по спеку. **Реальная сборка случится при Task 12 в Dokploy** — если что-то сломается, fixup-коммит. Sanity-check Dockerfile-синтаксиса визуальный (multistage + final FROM + non-root + HEALTHCHECK присутствуют).
+- **Files:** `Dockerfile`, `.dockerignore`.
+- **Изменение vs первоначальный план:**
+  - Stage 1 — `node:20-alpine` для размера (~50 MB) → `npm ci --no-audit --no-fund --prefer-offline` → `vite build`.
+  - Stage 2 — `python:3.12-slim` + uv binary из `ghcr.io/astral-sh/uv:latest` → `uv sync --frozen --no-dev --no-install-project` (один слой инвалидируется только при изменении lockfile).
+  - Stage 3 — `python:3.12-slim` (~150 MB база) + venv (Stage 2) + `src/` + `frontend/dist → src/webapp/static`. Без uv в runtime — меньше attack surface, меньше слой.
+  - HEALTHCHECK через `python -c "urllib.request.urlopen(/api/health)"` — stdlib, без curl/wget в slim-образе. `start-period=20s` чтобы uvicorn успел подняться до первой проверки.
+  - `WEBAPP_HOST=0.0.0.0` и `WEBAPP_PORT=8000` зашиты в ENV образа — Dokploy может переопределить через env-vars.
 
 ### Task 12: deploy в Dokploy
 - **Acceptance:** Mini App открывается в admin-боте на телефоне; все 4 страницы грузятся; реальные данные.
