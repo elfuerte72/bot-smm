@@ -1,47 +1,69 @@
-import { useEffect, useState } from "react";
-import { api, ApiError } from "./api";
-import { tg } from "./telegram";
+import { lazy, Suspense } from "react";
+import { BrowserRouter, Route, Routes } from "react-router-dom";
+import Layout from "./components/Layout";
+import Spinner from "./components/Spinner";
 
-interface HealthResponse {
-  status: string;
-  db: string;
+const Posts = lazy(() => import("./pages/Posts"));
+const PostDetail = lazy(() => import("./pages/PostDetail"));
+const Channel = lazy(() => import("./pages/Channel"));
+const Reactions = lazy(() => import("./pages/Reactions"));
+
+function PageFallback() {
+  return (
+    <div style={{ textAlign: "center", padding: 20 }}>
+      <Spinner />
+    </div>
+  );
 }
 
 export default function App() {
-  const [health, setHealth] = useState<HealthResponse | null>(null);
-  const [error, setError] = useState<string | null>(null);
-
-  useEffect(() => {
-    api<HealthResponse>("/health")
-      .then(setHealth)
-      .catch((e: unknown) => {
-        if (e instanceof ApiError) {
-          setError(`${e.status}: ${e.body}`);
-          if (e.status === 401 || e.status === 403) {
-            tg?.close();
-          }
-        } else {
-          setError(String(e));
-        }
-      });
-  }, []);
-
   return (
-    <div className="app">
-      <h1>SMM Bot — Stats</h1>
-      <p className="muted">Frontend bootstrap страница. Полные страницы появятся в Task 10.</p>
-      <div className="card">
-        <strong>Backend health:</strong>{" "}
-        {error ? (
-          <span className="error">{error}</span>
-        ) : health ? (
-          <code>
-            {health.status} / db={health.db}
-          </code>
-        ) : (
-          <span className="spinner" aria-label="loading" />
-        )}
-      </div>
-    </div>
+    <BrowserRouter>
+      <Routes>
+        <Route element={<Layout />}>
+          <Route
+            index
+            element={
+              <Suspense fallback={<PageFallback />}>
+                <Posts />
+              </Suspense>
+            }
+          />
+          <Route
+            path="/posts/:id"
+            element={
+              <Suspense fallback={<PageFallback />}>
+                <PostDetail />
+              </Suspense>
+            }
+          />
+          <Route
+            path="/channel"
+            element={
+              <Suspense fallback={<PageFallback />}>
+                <Channel />
+              </Suspense>
+            }
+          />
+          <Route
+            path="/reactions"
+            element={
+              <Suspense fallback={<PageFallback />}>
+                <Reactions />
+              </Suspense>
+            }
+          />
+          <Route
+            path="*"
+            element={
+              <div className="card">
+                <h2>404</h2>
+                <p className="muted">Страница не найдена.</p>
+              </div>
+            }
+          />
+        </Route>
+      </Routes>
+    </BrowserRouter>
   );
 }

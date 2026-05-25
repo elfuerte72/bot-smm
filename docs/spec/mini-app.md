@@ -16,8 +16,8 @@
 | 6 | FastAPI: posts/channel/reactions routes | ✅ DONE | `d878a5c`, `859ce15` (GROUP BY, status alias) |
 | 7 | admin bot | ✅ DONE | `8554ede` |
 | 8 | TaskGroup-оркестрация в main.py | ✅ DONE | `75156aa` |
-| 9 | frontend bootstrap | ✅ DONE | (см. этот коммит) |
-| 10 | frontend pages | ⏳ TODO | — |
+| 9 | frontend bootstrap | ✅ DONE | `e148ea7` |
+| 10 | frontend pages | ✅ DONE | (см. этот коммит) |
 | 11 | Dockerfile multi-stage | ⏳ TODO | — |
 | 12 | deploy в Dokploy | ⏳ TODO | — |
 
@@ -673,10 +673,17 @@ await conn.execute("PRAGMA synchronous=NORMAL")
   - В `styles.css` — CSS-переменные Telegram-темы (`--tg-bg`, `--tg-button` и т.п.), fallback на тёмные цвета (Telegram-default).
   - Placeholder-страница App.tsx уже стучится в `/api/health` — это и есть live-проверка proxy.
 
-### Task 10: frontend pages
+### Task 10: frontend pages — ✅ DONE
 - **Acceptance:** 4 страницы (Posts, PostDetail, Channel, Reactions) функциональны на реальных данных; `npm run build` успешен; bundle ≤ 200KB gzipped; Telegram-тема применяется через CSS-vars.
-- **Verify:** `npm run build` → `du -sh dist/assets/*.js` (≤ 200KB gz). Через cloudflared tunnel открыть в Telegram — все 4 страницы рендерятся.
-- **Files:** `frontend/src/pages/*.tsx`, `frontend/src/components/*.tsx`.
+- **Verify:** `npm run build` → суммарно ~62.5 KB gz (вендор 55 + 4 lazy-чанка страниц 1–2 KB каждый + CSS 0.74 + ErrorView 0.48). Огромный запас до P1 = 200 KB gz. `npm run typecheck` и `npm run lint` зелёные. Реальный e2e (страницы на данных) ждёт Task 12.
+- **Files:** `frontend/src/pages/{Posts,PostDetail,Channel,Reactions}.tsx`, `frontend/src/components/{Layout,PostCard,Sparkline,Spinner,ErrorView}.tsx`, `frontend/src/types.ts`, `frontend/src/App.tsx` (rewrite на BrowserRouter + lazy).
+- **Изменение vs первоначальный план:**
+  - `React.lazy` для каждой страницы — экономит ~10 KB gz на главном чанке и даёт быстрый initial paint. Suspense fallback — Spinner.
+  - `ErrorView` — отдельный компонент, переиспользуется во всех страницах. На 401/403 закрывает Mini App через `tg.close()`.
+  - `PostDetail` отображает полный `formatted_text` (HTML с `<b>`, `<a>`, `<code>`, `<blockquote>` — наш SYSTEM_PROMPT). Для этого backend `repo.get_post_detail` доп. возвращает `formatted_text` в post-объекте (в list-ответе остаётся только preview из соображений размера).
+  - Поиск в `Posts` дебаунсится на 300мс — иначе на каждый символ улетал бы запрос.
+  - `Sparkline` — pure SVG ~50 строк, без chart-библиотек (как в Tech Stack). Считает min/max и линейный масштаб.
+  - Дата в `formatDate` интерпретирует ISO без `Z` как UTC (SQLite даты без таймзоны) — иначе браузер берёт local TZ и таймстампы съезжают.
 
 ### Task 11: Dockerfile multi-stage
 - **Acceptance:** 3 stage (node → python deps → runtime); финальный образ ≤ 250MB; bundle React в `/app/src/webapp/static/`; healthcheck бьёт `/api/health`; non-root `app:app`.

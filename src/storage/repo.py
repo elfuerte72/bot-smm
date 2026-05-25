@@ -608,6 +608,9 @@ async def get_post_detail(draft_id: int) -> dict[str, object] | None:
             if row is None:
                 return None
             post = _row_to_post(row)
+            # В detail отдаём полный текст поста (HTML-сериализация для Telegram).
+            # В list-ответе сидит только preview из соображений payload-размера.
+            post["formatted_text"] = str(row[5] or "")
 
         events: list[dict[str, object]] = []
         async with conn.execute(
