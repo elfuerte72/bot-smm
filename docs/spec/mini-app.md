@@ -1,6 +1,6 @@
 # Spec: Telegram Mini App — админская панель статистики SMM-бота
 
-> **Статус:** Phase 3 — Implement. Tasks 1-3 готовы, Task 4-12 в очереди.
+> **Статус:** Phase 3 — Implement. Tasks 1-11 готовы (11 — code-only, без локального docker build). Task 12 (deploy) ждёт домен и ADMIN_BOT_TOKEN от пользователя.
 > **Связан с:** Plan-файл `/Users/penkin/.claude/plans/mini-app-ethereal-kite.md`.
 > **История:** см. git log этого файла.
 
@@ -18,8 +18,8 @@
 | 8 | TaskGroup-оркестрация в main.py | ✅ DONE | `75156aa` |
 | 9 | frontend bootstrap | ✅ DONE | `e148ea7` |
 | 10 | frontend pages | ✅ DONE | `35b3b5b` |
-| 11 | Dockerfile multi-stage | ⚠️ CODE-ONLY | (см. этот коммит) |
-| 12 | deploy в Dokploy | ⏳ TODO | — |
+| 11 | Dockerfile multi-stage | ⚠️ CODE-ONLY | `e828cfd` |
+| 12 | deploy в Dokploy | 🚧 BLOCKED (нужен вход пользователя) | — |
 
 **Текущая БД-схема и runtime-поведение (актуально на момент Task 3+fixup):**
 - 7 таблиц (4 старых + `draft_events`, `post_reactions`, `channel_snapshots`).
@@ -696,10 +696,18 @@ await conn.execute("PRAGMA synchronous=NORMAL")
   - HEALTHCHECK через `python -c "urllib.request.urlopen(/api/health)"` — stdlib, без curl/wget в slim-образе. `start-period=20s` чтобы uvicorn успел подняться до первой проверки.
   - `WEBAPP_HOST=0.0.0.0` и `WEBAPP_PORT=8000` зашиты в ENV образа — Dokploy может переопределить через env-vars.
 
-### Task 12: deploy в Dokploy
+### Task 12: deploy в Dokploy — 🚧 BLOCKED
 - **Acceptance:** Mini App открывается в admin-боте на телефоне; все 4 страницы грузятся; реальные данные.
 - **Verify:** ручной e2e на телефоне; `curl https://<домен>/api/health` → 200; @BotFather `/setmenubutton` для admin-бота указывает на `MINI_APP_URL`; Traefik dashboard показывает router.
 - **Files:** конфиг Dokploy (env-vars + Traefik labels).
+- **Что ещё нужно от пользователя (Open Questions 1–2 + 3):**
+  1. Выбрать домен Mini App (например `stats.aibromotion.tech`). Прописать в Dokploy → Traefik labels.
+  2. Создать новый бот через @BotFather (`/newbot`) → положить токен в `ADMIN_BOT_TOKEN` (Dokploy env).
+  3. В `.env` Dokploy установить: `ADMIN_BOT_TOKEN=...`, `MINI_APP_URL=https://<домен>`, остальные старые переменные оставить.
+  4. Включить EXPOSE 8000 в Dokploy + Traefik label `traefik.http.routers.smmbot.rule=Host(\`<домен>\`)` + `traefik.http.services.smmbot.loadbalancer.server.port=8000` + автo-HTTPS Let's Encrypt.
+  5. Redeploy.
+  6. После старта — @BotFather `/setmenubutton` для **admin-бота** → текст «📊 Статистика», URL `https://<домен>` (best-effort `set_chat_menu_button` ставит то же из кода для allowed-юзеров; menu button у Telegram per-bot, поэтому BotFather-вариант покрывает всех).
+- **Smoke на телефоне** (`Verification end-to-end` ниже — 12 пунктов).
 
 ---
 
