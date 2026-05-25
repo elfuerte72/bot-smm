@@ -12,7 +12,7 @@
 | 2 | audit-события в handlers | ✅ DONE | `c360fcf`, `76a3dc1` (fail-soft + порядок mutate→audit) |
 | 3 | reaction handler + allowed_updates | ✅ DONE | `d23d4bb`, `76a3dc1` (chat-id filter) |
 | 4 | channel snapshot scheduler job | ✅ DONE | `7950626` |
-| 5 | FastAPI skeleton + auth | ⏳ TODO | — |
+| 5 | FastAPI skeleton + auth | ✅ DONE | `5d5b31b` |
 | 6 | FastAPI: posts/channel/reactions routes | ⏳ TODO | — |
 | 7 | admin bot | ⏳ TODO | — |
 | 8 | TaskGroup-оркестрация в main.py | ⏳ TODO | — |
@@ -622,10 +622,16 @@ await conn.execute("PRAGMA synchronous=NORMAL")
   - `channel_snapshot` fail-soft: исключения и в `getChatMemberCount`, и в `add_channel_snapshot` логируются, но не валят job — лучше пропустить тик sparkline, чем уронить периодическую задачу.
   - Дефолт `CHANNEL_SNAPSHOT_INTERVAL_MINUTES = 60` в `config.py`; в `.env.example` добавлена строка.
 
-### Task 5: FastAPI skeleton + auth
+### Task 5: FastAPI skeleton + auth — ✅ DONE (`5d5b31b`)
 - **Acceptance:** `fastapi`, `uvicorn[standard]` установлены; `/api/health` без auth = 200; `/api/me` без header = 401; со старым/битым `auth_date` = 401; с user_id вне allowed = 403.
-- **Verify:** `curl :8000/api/health` → 200; `curl :8000/api/me` → 401; подписанный валидный → 200 с user-объектом.
-- **Files:** `pyproject.toml`, `src/webapp/{__init__,server,auth,deps}.py`, `src/webapp/routes/{health,me}.py`.
+- **Verify:** TestClient прогнал 8 кейсов (health/no-header/empty/bad-hash/not-allowed/owner/expired/POST→405), все зелёные.
+- **Files:** `pyproject.toml`, `src/webapp/{__init__,server,auth,deps}.py`, `src/webapp/routes/{health,me}.py`, `src/config.py`, `.env.example`, `.gitignore`.
+- **Изменение vs первоначальный план:**
+  - `get_current_user` принимает `Header(default=None)` и сам поднимает 401 вместо дефолтного pydantic 422 — фронт ждёт 401, чтобы делать `tg.close()`.
+  - `validate_init_data` дополнительно отвергает запрос, если `ADMIN_BOT_TOKEN` пуст (dev без токена не должен пропускать API).
+  - `CurrentUser` вынесен в `deps.py` как `Annotated[..., Depends]` — будут переиспользовать все будущие роуты (B008-чистая инъекция).
+  - `server.build_webapp` отключает `/docs`, `/redoc`, `/openapi.json` (внутренний инструмент, схема не нужна).
+  - SPA-static/assets-mount условный: `src/webapp/static/` есть только после Vite build в multi-stage Docker, в dev фронт идёт через `vite dev` на :5173.
 
 ### Task 6: FastAPI — posts/channel/reactions routes
 - **Acceptance:** все 8 эндпоинтов отвечают 200 с корректной схемой; SQL — параметризованный, нет инъекций; ответ для `/api/posts/stats` совпадает с прямым SQL `GROUP BY status`.
