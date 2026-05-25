@@ -11,7 +11,7 @@
 | 1 | расширение БД и WAL | ✅ DONE | `8948d5e` (taskwork), `76a3dc1` (FK ON fixup) |
 | 2 | audit-события в handlers | ✅ DONE | `c360fcf`, `76a3dc1` (fail-soft + порядок mutate→audit) |
 | 3 | reaction handler + allowed_updates | ✅ DONE | `d23d4bb`, `76a3dc1` (chat-id filter) |
-| 4 | channel snapshot scheduler job | ⏳ TODO | — |
+| 4 | channel snapshot scheduler job | ✅ DONE | `7950626` |
 | 5 | FastAPI skeleton + auth | ⏳ TODO | — |
 | 6 | FastAPI: posts/channel/reactions routes | ⏳ TODO | — |
 | 7 | admin bot | ⏳ TODO | — |
@@ -613,10 +613,14 @@ await conn.execute("PRAGMA synchronous=NORMAL")
   - `OwnerOnlyMiddleware` не покрывает `message_reaction_count` observer (он подключён только к `dp.message` / `dp.callback_query`). Это OK для анонимных реакций (нет `from_user`), но важно помнить, если в будущем добавим `message_reaction` (per-user).
   - `allowed_updates` собирается через `dp.resolve_used_update_types()`, что делает список устойчивым к добавлению новых router'ов.
 
-### Task 4: channel snapshot scheduler job
+### Task 4: channel snapshot scheduler job — ✅ DONE (`7950626`)
 - **Acceptance:** job запускается раз в `CHANNEL_SNAPSHOT_INTERVAL_MINUTES` минут (default 60); первая запись добавляется сразу при старте; `member_count` совпадает с `getChatMemberCount`.
 - **Verify:** старт бота → подождать 30s → `SELECT * FROM channel_snapshots ORDER BY ts DESC LIMIT 1` — корректное число подписчиков.
-- **Files:** `src/scheduler.py`.
+- **Files:** `src/scheduler.py`, `src/config.py`, `.env.example`.
+- **Изменение vs первоначальный план:**
+  - `_apply_times` теперь удаляет только `cron_generate_*`-job'ы (был `remove_all_jobs`), иначе `/cron`-rescheduling сносил бы snapshot.
+  - `channel_snapshot` fail-soft: исключения и в `getChatMemberCount`, и в `add_channel_snapshot` логируются, но не валят job — лучше пропустить тик sparkline, чем уронить периодическую задачу.
+  - Дефолт `CHANNEL_SNAPSHOT_INTERVAL_MINUTES = 60` в `config.py`; в `.env.example` добавлена строка.
 
 ### Task 5: FastAPI skeleton + auth
 - **Acceptance:** `fastapi`, `uvicorn[standard]` установлены; `/api/health` без auth = 200; `/api/me` без header = 401; со старым/битым `auth_date` = 401; с user_id вне allowed = 403.
