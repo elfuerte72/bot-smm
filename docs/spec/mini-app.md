@@ -14,7 +14,7 @@
 | 4 | channel snapshot scheduler job | ✅ DONE | `7950626` |
 | 5 | FastAPI skeleton + auth | ✅ DONE | `5d5b31b` |
 | 6 | FastAPI: posts/channel/reactions routes | ✅ DONE | `d878a5c` |
-| 7 | admin bot | ⏳ TODO | — |
+| 7 | admin bot | ✅ DONE | `8554ede` |
 | 8 | TaskGroup-оркестрация в main.py | ⏳ TODO | — |
 | 9 | frontend bootstrap | ⏳ TODO | — |
 | 10 | frontend pages | ⏳ TODO | — |
@@ -644,10 +644,14 @@ await conn.execute("PRAGMA synchronous=NORMAL")
   - `channel_snapshot` job дополнительно best-effort сохраняет `app_settings['channel_title']` — нужен `/api/channel/stats`. Сбой `get_chat` не валит snapshot.
   - Все Query-параметры валидируются через pydantic (regex для status/period, `ge=/le=` для limit/offset/days) — bad-input отдаёт 422, защита от подбора через `limit ≤ 100`, `offset ≤ 10000`.
 
-### Task 7: admin bot
+### Task 7: admin bot — ✅ DONE (`8554ede`)
 - **Acceptance:** `/start` отвечает с `ReplyKeyboardMarkup` + `KeyboardButton(web_app=...)`; неаутентифицированный юзер игнорируется (как в main-боте); menu button ставится best-effort.
-- **Verify:** локально с туннелем, открыть admin-бота → `/start` → кнопка появилась; со стороннего юзера → молчит.
+- **Verify:** smoke прошёл (factory, middleware, handler-count, URL в keyboard, пустой URL → fallback на текст). Полный e2e ждёт Task 8 (TaskGroup) + Task 12 (deploy) + туннель.
 - **Files:** `src/adminbot/__init__.py`, `src/adminbot/bot.py`.
+- **Изменение vs первоначальный план:**
+  - При пустом `MINI_APP_URL` `/start` показывает текстовое предупреждение без клавиатуры — Telegram отклоняет `KeyboardButton(web_app=WebAppInfo(url=""))`.
+  - `setup_admin_menu_buttons` ловит конкретно `TelegramAPIError`, чтобы не глотать `KeyboardInterrupt`/`CancelledError`.
+  - Подключение в `main.py` (запуск polling параллельно с main-ботом и FastAPI) — Task 8.
 
 ### Task 8: TaskGroup-оркестрация в main.py
 - **Acceptance:** все три сервиса стартуют параллельно; SIGTERM (Docker) → graceful shutdown ≤ 5s; падение любого сервиса роняет весь процесс с не-нулевым кодом; в логах видно имена всех трёх задач.
