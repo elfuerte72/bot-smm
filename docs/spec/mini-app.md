@@ -15,7 +15,7 @@
 | 5 | FastAPI skeleton + auth | ✅ DONE | `5d5b31b`, `859ce15` (HMAC порядок) |
 | 6 | FastAPI: posts/channel/reactions routes | ✅ DONE | `d878a5c`, `859ce15` (GROUP BY, status alias) |
 | 7 | admin bot | ✅ DONE | `8554ede` |
-| 8 | TaskGroup-оркестрация в main.py | ⏳ TODO | — |
+| 8 | TaskGroup-оркестрация в main.py | ✅ DONE | (см. этот коммит) |
 | 9 | frontend bootstrap | ⏳ TODO | — |
 | 10 | frontend pages | ⏳ TODO | — |
 | 11 | Dockerfile multi-stage | ⏳ TODO | — |
@@ -653,10 +653,15 @@ await conn.execute("PRAGMA synchronous=NORMAL")
   - `setup_admin_menu_buttons` ловит конкретно `TelegramAPIError`, чтобы не глотать `KeyboardInterrupt`/`CancelledError`.
   - Подключение в `main.py` (запуск polling параллельно с main-ботом и FastAPI) — Task 8.
 
-### Task 8: TaskGroup-оркестрация в main.py
+### Task 8: TaskGroup-оркестрация в main.py — ✅ DONE
 - **Acceptance:** все три сервиса стартуют параллельно; SIGTERM (Docker) → graceful shutdown ≤ 5s; падение любого сервиса роняет весь процесс с не-нулевым кодом; в логах видно имена всех трёх задач.
-- **Verify:** `docker run` → `Ctrl+C` → выход с кодом 0. Принудительно бросить exception в одной из задач → процесс упал, в логе ExceptionGroup.
+- **Verify:** smoke `_run_webapp` с моком shutdown_event прошёл (~0.5с до set, uvicorn делает Application shutdown complete, finally вышел). `_run_main_bot`/`_run_admin_bot` собраны по той же схеме (asyncio.wait на polling + stop-watch). Полный e2e — после деплоя (Task 12).
 - **Files:** `src/main.py` (rewrite).
+- **Изменение vs первоначальный план:**
+  - `ADMIN_BOT_TOKEN` пуст → admin-бот и webapp пропускаются с warning, main-бот стартует один. Это даёт возможность поднять прод поэтапно: сначала main-бот, потом — Mini App.
+  - Каждый сервис использует пару tasks: `polling_task` (или `serve_task`) + `stop_task` (ждёт `shutdown_event`). Внешнее cancellation → отмена polling/serve, в `finally` чистим session/scheduler.
+  - `_install_signal_handlers` ловит и `SIGTERM` (Docker), и `SIGINT` (Ctrl+C). Повторный сигнал не дёргает второй shutdown — только лог.
+  - uvicorn запущен через `Server(Config(...))` напрямую, без `run()`. `log_level` — lowercase из settings, `access_log=False`, чтобы не дублировать loguru.
 
 ### Task 9: frontend bootstrap
 - **Acceptance:** `npm ci` устанавливает зависимости из lockfile; `npm run dev` поднимает Vite на :5173 с proxy `/api → :8000`; placeholder-страница рендерится.
