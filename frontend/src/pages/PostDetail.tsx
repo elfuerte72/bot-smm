@@ -174,6 +174,14 @@ export default function PostDetail() {
         </div>
       )}
 
+      {post.tg_channel_url && (
+        <div className="card" style={{ fontSize: 13 }}>
+          <a href={post.tg_channel_url} target="_blank" rel="noreferrer">
+            Открыть в Telegram-канале →
+          </a>
+        </div>
+      )}
+
       <div
         className="card"
         style={{ whiteSpace: "pre-wrap", lineHeight: 1.5, fontSize: 14 }}

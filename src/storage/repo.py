@@ -6,7 +6,9 @@ from dataclasses import dataclass
 from datetime import datetime, timedelta
 from difflib import SequenceMatcher
 
+from src.config import settings
 from src.storage.db import get_conn
+from src.storage.text_utils import make_preview
 
 
 @dataclass(slots=True)
@@ -548,6 +550,20 @@ async def list_posts(
     return items, total
 
 
+def _build_tg_channel_url(tg_message_id: object) -> str | None:
+    """Публичная ссылка на сообщение в канале вида https://t.me/<username>/<id>.
+
+    Возвращает None для приватных каналов (CHANNEL_ID начинается с -100) и для
+    постов без tg_message_id (драфты, отклонённые).
+    """
+    if tg_message_id is None:
+        return None
+    raw = (settings.channel_id or "").lstrip("@")
+    if not raw or raw.startswith("-100"):
+        return None
+    return f"https://t.me/{raw}/{int(tg_message_id)}"
+
+
 def _row_to_post(row: tuple[object, ...]) -> dict[str, object]:
     """Мап-функция из SQL-строки list_posts/get_post_detail в JSON-friendly dict."""
     (
@@ -564,7 +580,7 @@ def _row_to_post(row: tuple[object, ...]) -> dict[str, object]:
     ) = row
     title = (published_title or draft_title or "(без заголовка)").strip()
     formatted = str(formatted_text or "")
-    preview = formatted[:200] + ("…" if len(formatted) > 200 else "")
+    preview = make_preview(formatted, max_chars=200)
     return {
         "id": int(draft_id) if draft_id is not None else 0,
         "created_at": str(created_at) if created_at else None,
@@ -611,6 +627,7 @@ async def get_post_detail(draft_id: int) -> dict[str, object] | None:
             # В detail отдаём полный текст поста (HTML-сериализация для Telegram).
             # В list-ответе сидит только preview из соображений payload-размера.
             post["formatted_text"] = str(row[5] or "")
+            post["tg_channel_url"] = _build_tg_channel_url(post.get("tg_message_id"))
 
         events: list[dict[str, object]] = []
         async with conn.execute(

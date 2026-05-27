@@ -47,7 +47,7 @@ export interface ReactionsAgg {
 }
 
 export interface PostDetailResponse {
-  post: Post & { formatted_text: string };
+  post: Post & { formatted_text: string; tg_channel_url: string | null };
   events: DraftEvent[];
   reactions: ReactionsAgg | null;
 }

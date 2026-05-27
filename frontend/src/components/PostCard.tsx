@@ -69,6 +69,16 @@ export default function PostCard({ post }: { post: Post }) {
       <div className="muted" style={{ fontSize: 13 }}>
         {post.preview}
       </div>
+      <div
+        style={{
+          marginTop: 6,
+          fontSize: 12,
+          fontWeight: 500,
+          color: "var(--tg-link)",
+        }}
+      >
+        Читать полностью →
+      </div>
     </Link>
   );
 }

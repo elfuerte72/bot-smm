@@ -89,6 +89,23 @@ Cron всегда работает в default-режиме.
 
 SQLite через `aiosqlite`, файл `./data/smm.db` (в Docker — `/data/smm.db`, volume). Миграции — простой `CREATE TABLE IF NOT EXISTS` + `_ensure_column` для добавления полей (см. `src/storage/db.py`). Таблицы: `drafts`, `published`, `app_settings` (key/value, в т.ч. cron_times), `api_usage`.
 
+### Бэкфилл архива канала
+
+Bot API не умеет читать историю канала — поэтому архивные посты (всё, что было до запуска бота) заливаются разовым импортом из экспорта Telegram Desktop:
+
+1. Telegram Desktop → Settings → Advanced → Export Telegram data → выбрать только канал (например `aibromotion`) → format **JSON**, без медиа.
+2. Положить файл как `./data/<channel>_export.json`.
+3. Сухой прогон с превью первых 3 постов:
+   ```bash
+   uv run python scripts/backfill_from_tg_export.py \
+       --input ./data/aibromotion_export.json \
+       --channel-username aibromotion \
+       --dry-run --limit 5
+   ```
+4. Боевой прогон (без `--dry-run`). Идемпотентность по `published.tg_message_id` — повторный запуск пропустит уже импортированные.
+
+Импортированные посты пишутся напрямую в `drafts` + `published` со `status='published'`, минуя публикационную логику. Медиа и реакции не тянутся (для исторических постов даём только текст + ссылку `https://t.me/<channel>/<msg_id>` в карточке деталки).
+
 ### Стиль кода
 
 - Ruff правила: `E, F, I, B, UP, ASYNC`, line-length 100, target-version `py312`. `from __future__ import annotations` во всех модулях.
