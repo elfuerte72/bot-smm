@@ -1,67 +1,112 @@
-import { useEffect, useState } from "react";
-import { api } from "../api";
+import { useState } from "react";
+import AnimatedNumber from "../components/AnimatedNumber";
+import Delta from "../components/Delta";
 import ErrorView from "../components/ErrorView";
+import { IconUsers } from "../components/icons";
+import SegmentedControl from "../components/SegmentedControl";
+import { Skeleton } from "../components/Skeleton";
 import Sparkline from "../components/Sparkline";
-import Spinner from "../components/Spinner";
+import { useApi } from "../hooks/useApi";
 import type { ChannelStats } from "../types";
+import { formatDate, formatNumber } from "../utils/format";
 
-function formatDate(iso: string): string {
-  const d = new Date(iso.includes("T") ? iso : iso.replace(" ", "T") + "Z");
-  if (Number.isNaN(d.getTime())) return iso;
-  return d.toLocaleDateString("ru-RU", { day: "2-digit", month: "short" });
-}
+type Days = "7" | "14" | "30";
+
+const PERIODS: Array<{ value: Days; label: string }> = [
+  { value: "7", label: "7 дней" },
+  { value: "14", label: "14 дней" },
+  { value: "30", label: "30 дней" },
+];
 
 export default function Channel() {
-  const [data, setData] = useState<ChannelStats | null>(null);
-  const [error, setError] = useState<unknown>(null);
+  const [days, setDays] = useState<Days>("7");
+  const { data, error, loading, reload } = useApi<ChannelStats>(`/channel/stats?days=${days}`);
 
-  useEffect(() => {
-    api<ChannelStats>("/channel/stats?days=7").then(setData).catch(setError);
-  }, []);
-
-  if (error) return <ErrorView error={error} />;
-  if (!data) {
-    return (
-      <div style={{ textAlign: "center", padding: 20 }}>
-        <Spinner />
-      </div>
-    );
-  }
-
-  const memberCount = data.member_count;
-  const values = data.snapshots.map((s) => s.member_count);
+  const snapshots = data?.snapshots ?? [];
+  const values = snapshots.map((s) => s.member_count);
+  const memberCount = data?.member_count ?? null;
+  const growth = values.length >= 2 ? values[values.length - 1] - values[0] : null;
+  const peak = values.length ? Math.max(...values) : null;
+  const low = values.length ? Math.min(...values) : null;
 
   return (
-    <div>
-      <h2 style={{ margin: "0 0 16px" }}>{data.title || data.channel_id}</h2>
-
-      <div className="card" style={{ textAlign: "center" }}>
-        <div className="muted" style={{ fontSize: 13 }}>
-          Подписчики
+    <div className="page">
+      <header className="page-header">
+        <div>
+          <div className="eyebrow">Аналитика канала</div>
+          <h1 className="page-title">{data?.title || data?.channel_id || "Канал"}</h1>
         </div>
-        <div style={{ fontSize: 40, fontWeight: 700, lineHeight: 1.1 }}>
-          {memberCount != null ? memberCount.toLocaleString("ru-RU") : "—"}
-        </div>
-        {data.snapshots.length > 0 && (
-          <div className="muted" style={{ fontSize: 12, marginTop: 4 }}>
-            точек за {data.days} дней: {data.snapshots.length}
-          </div>
-        )}
-      </div>
+      </header>
 
-      <div className="card">
-        <div style={{ marginBottom: 8, fontWeight: 600 }}>Динамика за {data.days} дней</div>
-        <Sparkline data={values} width={320} height={70} />
-        {data.snapshots.length > 0 && (
-          <div
-            className="muted"
-            style={{ display: "flex", justifyContent: "space-between", fontSize: 12, marginTop: 4 }}
-          >
-            <span>{formatDate(data.snapshots[0].ts)}</span>
-            <span>{formatDate(data.snapshots[data.snapshots.length - 1].ts)}</span>
+      {error ? (
+        <ErrorView error={error} onRetry={reload} />
+      ) : (
+        <>
+          <SegmentedControl
+            options={PERIODS}
+            value={days}
+            onChange={setDays}
+          />
+
+          <div className="hero" style={{ marginTop: "var(--space-3)" }}>
+            <div className="hero__label">
+              <IconUsers size={17} />
+              Подписчики
+            </div>
+            <div className="hero__value">
+              {loading ? (
+                <Skeleton width={150} height={44} />
+              ) : memberCount === null ? (
+                "—"
+              ) : (
+                <AnimatedNumber value={memberCount} />
+              )}
+            </div>
+            {!loading && (
+              <div style={{ marginTop: 10 }}>
+                <Delta value={growth} suffix={`за ${days} дн`} />
+              </div>
+            )}
+            {values.length >= 2 && (
+              <div className="hero__chart">
+                <Sparkline data={values} height={96} />
+              </div>
+            )}
           </div>
-        )}
-      </div>
+
+          {!loading && values.length >= 2 && (
+            <div className="metric-grid" style={{ marginTop: "var(--space-3)" }}>
+              <div className="metric">
+                <div className="metric__value">{peak !== null ? formatNumber(peak) : "—"}</div>
+                <div className="metric__label">Максимум за период</div>
+              </div>
+              <div className="metric">
+                <div className="metric__value">{low !== null ? formatNumber(low) : "—"}</div>
+                <div className="metric__label">Минимум за период</div>
+              </div>
+            </div>
+          )}
+
+          {snapshots.length > 0 && (
+            <div
+              className="muted text-xs"
+              style={{ display: "flex", justifyContent: "space-between", marginTop: 14 }}
+            >
+              <span>{formatDate(snapshots[0].ts)}</span>
+              <span>
+                {formatNumber(snapshots.length)} срезов
+              </span>
+              <span>{formatDate(snapshots[snapshots.length - 1].ts)}</span>
+            </div>
+          )}
+
+          {!loading && snapshots.length < 2 && (
+            <div className="card muted text-sm" style={{ marginTop: 14 }}>
+              Недостаточно данных для графика — снимки накапливаются по расписанию.
+            </div>
+          )}
+        </>
+      )}
     </div>
   );
 }

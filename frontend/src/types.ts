@@ -1,3 +1,10 @@
+export interface MeResponse {
+  id: number;
+  username: string | null;
+  first_name: string | null;
+  is_owner: boolean;
+}
+
 export type PostStatus = "draft" | "publishing" | "published" | "rejected";
 
 export interface Post {

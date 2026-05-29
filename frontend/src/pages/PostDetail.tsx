@@ -1,54 +1,22 @@
-import { useEffect, useState } from "react";
-import { Link, useParams } from "react-router-dom";
-import { api } from "../api";
+import { Link, useNavigate, useParams } from "react-router-dom";
 import ErrorView from "../components/ErrorView";
-import Spinner from "../components/Spinner";
-import type { DraftEvent, PostDetailResponse } from "../types";
+import { IconBack, IconClock, IconHeart, IconLink } from "../components/icons";
+import ReactionChips from "../components/ReactionChips";
+import { Skeleton } from "../components/Skeleton";
+import StatusBadge from "../components/StatusBadge";
+import { useApi } from "../hooks/useApi";
+import { useBackButton } from "../hooks/useBackButton";
+import { tg } from "../telegram";
+import type { DraftEvent, PostDetailResponse, PostStatus } from "../types";
+import { formatDateTime } from "../utils/format";
 
-function formatDateTime(iso: string | null): string {
-  if (!iso) return "—";
-  const d = new Date(iso.includes("T") ? iso : iso.replace(" ", "T") + "Z");
-  if (Number.isNaN(d.getTime())) return iso;
-  return d.toLocaleString("ru-RU");
-}
-
-function EventCard({ ev }: { ev: DraftEvent }) {
-  return (
-    <div className="card">
-      <div style={{ display: "flex", justifyContent: "space-between", gap: 8, marginBottom: 6 }}>
-        <strong>{eventLabel(ev.event_type)}</strong>
-        <span className="muted" style={{ fontSize: 12 }}>
-          {formatDateTime(ev.created_at)}
-        </span>
-      </div>
-      {ev.actor_user_id != null ? (
-        <div className="muted" style={{ fontSize: 12, marginBottom: 6 }}>
-          actor: <code>{ev.actor_user_id}</code>
-        </div>
-      ) : (
-        <div className="muted" style={{ fontSize: 12, marginBottom: 6 }}>
-          cron / system
-        </div>
-      )}
-      <EventPayload ev={ev} />
-    </div>
-  );
-}
-
-function eventLabel(type: DraftEvent["event_type"]): string {
-  switch (type) {
-    case "created":
-      return "Создан";
-    case "edited":
-      return "Отредактирован";
-    case "regenerated_from":
-      return "Перегенерирован";
-    case "approved":
-      return "Одобрен";
-    case "rejected":
-      return "Отклонён";
-  }
-}
+const EVENT_LABEL: Record<DraftEvent["event_type"], string> = {
+  created: "Создан",
+  edited: "Отредактирован",
+  regenerated_from: "Перегенерирован",
+  approved: "Одобрен",
+  rejected: "Отклонён",
+};
 
 function EventPayload({ ev }: { ev: DraftEvent }) {
   const p = ev.payload;
@@ -57,21 +25,20 @@ function EventPayload({ ev }: { ev: DraftEvent }) {
   }
   if (ev.event_type === "created") {
     return (
-      <div style={{ fontSize: 13 }}>
-        <div>mode: <code>{String(p.mode ?? "—")}</code></div>
-        {typeof p.topic === "string" && <div>topic: {p.topic}</div>}
+      <div className="text-sm muted" style={{ marginTop: 4 }}>
+        <div>
+          режим: <code>{String(p.mode ?? "—")}</code>
+        </div>
+        {typeof p.topic === "string" && <div>тема: {p.topic}</div>}
         {typeof p.source_url === "string" && (
-          <div className="muted" style={{ wordBreak: "break-all" }}>
-            {p.source_url}
-          </div>
+          <div style={{ wordBreak: "break-all" }}>{p.source_url}</div>
         )}
-        {typeof p.title === "string" && <div>title: {p.title}</div>}
       </div>
     );
   }
   if (ev.event_type === "regenerated_from" && typeof p.new_draft_id === "number") {
     return (
-      <div style={{ fontSize: 13 }}>
+      <div className="text-sm" style={{ marginTop: 4 }}>
         <Link to={`/posts/${p.new_draft_id}`}>
           → новый драфт #{p.new_draft_id}
           {typeof p.new_title === "string" ? `: ${p.new_title}` : ""}
@@ -81,16 +48,16 @@ function EventPayload({ ev }: { ev: DraftEvent }) {
   }
   if (ev.event_type === "approved") {
     return (
-      <div style={{ fontSize: 13 }} className="muted">
-        {typeof p.channel_id === "string" && <div>channel: {p.channel_id}</div>}
-        {typeof p.tg_message_id === "number" && <div>tg_message_id: {p.tg_message_id}</div>}
+      <div className="text-sm muted" style={{ marginTop: 4 }}>
+        {typeof p.channel_id === "string" && <div>канал: {p.channel_id}</div>}
+        {typeof p.tg_message_id === "number" && <div>сообщение: {p.tg_message_id}</div>}
       </div>
     );
   }
   if (ev.event_type === "rejected" && typeof p.reason === "string") {
     return (
-      <div className="muted" style={{ fontSize: 13 }}>
-        reason: {p.reason}
+      <div className="text-sm muted" style={{ marginTop: 4 }}>
+        причина: {p.reason}
       </div>
     );
   }
@@ -98,27 +65,15 @@ function EventPayload({ ev }: { ev: DraftEvent }) {
 }
 
 function DiffBlock({ diff }: { diff: string }) {
-  const lines = diff.split("\n");
   return (
-    <pre
-      style={{
-        background: "rgba(0,0,0,0.25)",
-        padding: 10,
-        borderRadius: 8,
-        margin: 0,
-        fontSize: 12,
-        whiteSpace: "pre-wrap",
-        wordBreak: "break-word",
-        overflowX: "auto",
-      }}
-    >
-      {lines.map((line, i) => {
-        let color: string | undefined;
-        if (line.startsWith("+") && !line.startsWith("+++")) color = "#5ec27a";
-        else if (line.startsWith("-") && !line.startsWith("---")) color = "#e07a7a";
-        else if (line.startsWith("@@")) color = "#6ab3f3";
+    <pre className="diff">
+      {diff.split("\n").map((line, i) => {
+        let cls: string | undefined;
+        if (line.startsWith("+") && !line.startsWith("+++")) cls = "diff__add";
+        else if (line.startsWith("-") && !line.startsWith("---")) cls = "diff__del";
+        else if (line.startsWith("@@")) cls = "diff__hunk";
         return (
-          <span key={i} style={{ color, display: "block" }}>
+          <span key={i} className={cls} style={cls ? undefined : { display: "block" }}>
             {line || "​"}
           </span>
         );
@@ -127,99 +82,142 @@ function DiffBlock({ diff }: { diff: string }) {
   );
 }
 
+function DetailSkeleton() {
+  return (
+    <div className="page">
+      <Skeleton width="70%" height={26} style={{ marginBottom: 12 }} />
+      <Skeleton width={180} height={14} style={{ marginBottom: 20 }} />
+      <div className="card">
+        <Skeleton height={14} style={{ marginBottom: 8 }} />
+        <Skeleton height={14} style={{ marginBottom: 8 }} />
+        <Skeleton width="85%" height={14} style={{ marginBottom: 8 }} />
+        <Skeleton width="60%" height={14} />
+      </div>
+    </div>
+  );
+}
+
 export default function PostDetail() {
   const { id } = useParams<{ id: string }>();
-  const [data, setData] = useState<PostDetailResponse | null>(null);
-  const [error, setError] = useState<unknown>(null);
+  const navigate = useNavigate();
+  useBackButton();
 
-  useEffect(() => {
-    if (!id) return;
-    setData(null);
-    setError(null);
-    api<PostDetailResponse>(`/posts/${encodeURIComponent(id)}`)
-      .then(setData)
-      .catch(setError);
-  }, [id]);
+  const { data, error, reload } = useApi<PostDetailResponse>(
+    id ? `/posts/${encodeURIComponent(id)}` : null,
+  );
 
-  if (error) return <ErrorView error={error} />;
-  if (!data) {
+  if (error) {
     return (
-      <div style={{ textAlign: "center", padding: 20 }}>
-        <Spinner />
+      <div className="page">
+        <ErrorView error={error} onRetry={reload} />
       </div>
     );
   }
+  if (!data) return <DetailSkeleton />;
 
   const { post, events, reactions } = data;
+
   return (
-    <div>
-      <div style={{ marginBottom: 12 }}>
-        <Link to="/" className="muted">
-          ← Назад к постам
-        </Link>
-      </div>
-
-      <h2 style={{ margin: "0 0 8px" }}>{post.title}</h2>
-      <div className="muted" style={{ fontSize: 13, marginBottom: 12 }}>
-        <span>#{post.id}</span> • <span>{post.status ?? "—"}</span> •{" "}
-        <span>{formatDateTime(post.created_at)}</span>
-      </div>
-
-      {post.primary_source_url && (
-        <div className="card" style={{ fontSize: 13 }}>
-          <span className="muted">Источник: </span>
-          <a href={post.primary_source_url} target="_blank" rel="noreferrer">
-            {post.primary_source_url}
-          </a>
-        </div>
+    <div className="page">
+      {/* В Telegram навигацию даёт нативная BackButton; вне его — текстовая. */}
+      {!tg && (
+        <button
+          onClick={() => navigate(-1)}
+          className="linkrow muted"
+          style={{ marginBottom: 12 }}
+        >
+          <IconBack /> Назад
+        </button>
       )}
 
+      <div style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: 8 }}>
+        <StatusBadge status={post.status as PostStatus | null} />
+        <span className="muted text-xs">#{post.id}</span>
+      </div>
+      <h1 className="page-title" style={{ fontSize: 23, marginBottom: 8 }}>
+        {post.title}
+      </h1>
+      <div className="muted text-sm" style={{ display: "flex", alignItems: "center", gap: 6, marginBottom: 16 }}>
+        <IconClock size={14} />
+        {formatDateTime(post.created_at)}
+      </div>
+
       {post.tg_channel_url && (
-        <div className="card" style={{ fontSize: 13 }}>
-          <a href={post.tg_channel_url} target="_blank" rel="noreferrer">
-            Открыть в Telegram-канале →
-          </a>
-        </div>
+        <a
+          href={post.tg_channel_url}
+          target="_blank"
+          rel="noreferrer"
+          className="card tappable linkrow"
+          style={{ color: "var(--accent)" }}
+        >
+          <IconLink />
+          Открыть в Telegram-канале
+        </a>
+      )}
+
+      {post.primary_source_url && (
+        <a
+          href={post.primary_source_url}
+          target="_blank"
+          rel="noreferrer"
+          className="card tappable"
+        >
+          <div className="linkrow">
+            <IconLink />
+            Источник
+          </div>
+          <div className="linkrow__url" style={{ marginTop: 4 }}>
+            {post.primary_source_url}
+          </div>
+        </a>
       )}
 
       <div
-        className="card"
-        style={{ whiteSpace: "pre-wrap", lineHeight: 1.5, fontSize: 14 }}
-        // formatted_text — HTML-payload, который шлётся в Telegram (<b>, <a>,
-        // <code>, <blockquote>). Источник — наш SYSTEM_PROMPT, прошедший
-        // антибот-фильтры и валидацию длины. Внутренний инструмент,
-        // dangerouslySetInnerHTML здесь допустим.
-        dangerouslySetInnerHTML={{
-          __html: post.formatted_text || post.preview || "(пусто)",
-        }}
+        className="card post-body"
+        // formatted_text — HTML-payload для Telegram (<b>, <a>, <code>,
+        // <blockquote>), наш SYSTEM_PROMPT после антибот-фильтров и валидации.
+        // Внутренний инструмент — dangerouslySetInnerHTML допустим.
+        dangerouslySetInnerHTML={{ __html: post.formatted_text || post.preview || "(пусто)" }}
       />
 
       {reactions && reactions.reactions.length > 0 && (
         <div className="card">
-          <div style={{ marginBottom: 6, fontWeight: 600 }}>
-            Реакции: {reactions.total_count}
+          <div style={{ display: "flex", alignItems: "center", gap: 6, fontWeight: 700 }}>
+            <IconHeart size={16} />
+            Реакции · {reactions.total_count}
           </div>
-          <div style={{ display: "flex", gap: 10, flexWrap: "wrap" }}>
-            {reactions.reactions.map((r) => (
-              <span key={r.emoji} style={{ fontSize: 14 }}>
-                <span style={{ fontSize: 18 }}>{r.emoji}</span>{" "}
-                <span className="muted">×{r.count}</span>
-              </span>
-            ))}
-          </div>
+          <ReactionChips reactions={reactions.reactions} />
           {reactions.updated_at && (
-            <div className="muted" style={{ fontSize: 12, marginTop: 6 }}>
+            <div className="muted text-xs" style={{ marginTop: 8 }}>
               обновлено {formatDateTime(reactions.updated_at)}
             </div>
           )}
         </div>
       )}
 
-      <h3 style={{ marginTop: 20, marginBottom: 10 }}>История</h3>
+      <div className="section-head">
+        <span className="section-head__title">История</span>
+      </div>
       {events.length === 0 ? (
-        <div className="card muted">Событий нет.</div>
+        <div className="card muted text-sm">Событий нет.</div>
       ) : (
-        events.map((ev) => <EventCard key={ev.id} ev={ev} />)
+        <div className="card">
+          <div className="timeline">
+            {events.map((ev) => (
+              <div key={ev.id} className="timeline__item">
+                <span className="timeline__dot" />
+                <div className="timeline__head">
+                  <span className="timeline__type">{EVENT_LABEL[ev.event_type]}</span>
+                  <span className="timeline__time">{formatDateTime(ev.created_at)}</span>
+                </div>
+                <div className="muted text-xs">
+                  {ev.actor_user_id != null ? `админ ${ev.actor_user_id}` : "cron / система"}
+                </div>
+                <EventPayload ev={ev} />
+              </div>
+            ))}
+          </div>
+        </div>
       )}
     </div>
   );
