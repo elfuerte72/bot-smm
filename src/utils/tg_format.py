@@ -1,12 +1,16 @@
 from __future__ import annotations
 
 import re
-from html import escape
+from html import escape, unescape
 
 from src.agent.schemas import PostDraft
 
 TELEGRAM_CAPTION_LIMIT = 1024
 TELEGRAM_MESSAGE_LIMIT = 4096
+
+# Удаляет любой HTML-тег целиком (включая <a href="...">: href внутри <...>
+# тоже срезается, остаётся только якорный текст). URL не содержат сырого '>'.
+_STRIP_TAGS_RE = re.compile(r"<[^>]+>")
 
 # Разрешённые теги Telegram, которые модель может использовать в body.
 # Telegram сам валидирует — но мы тоже подстрахуемся.
@@ -50,8 +54,20 @@ def format_post(draft: PostDraft) -> str:
     return "\n".join(parts)
 
 
+def visible_len(text: str) -> int:
+    """Длина текста так, как её считает Telegram: после парсинга entities.
+
+    Лимит caption (1024) Telegram применяет к ВИДИМОМУ тексту, а не к сырому
+    HTML. Поэтому теги (<b>, <blockquote>, ...) и особенно href внутри
+    <a href="URL"> в счёт не идут, видимыми остаются только символы и якорный
+    текст ссылки. Сырой len(text) переоценивал длину и гнал посты в разбивку
+    на два сообщения без необходимости.
+    """
+    return len(unescape(_STRIP_TAGS_RE.sub("", text)))
+
+
 def fits_caption(text: str) -> bool:
-    return len(text) <= TELEGRAM_CAPTION_LIMIT
+    return visible_len(text) <= TELEGRAM_CAPTION_LIMIT
 
 
 def truncate_to_message(text: str) -> str:
