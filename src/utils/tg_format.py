@@ -42,7 +42,7 @@ def format_post(draft: PostDraft) -> str:
         "",
         body,
         "",
-        why,
+        f"<blockquote>{why}</blockquote>",
         "",
         f'<a href="{source}">Источник</a>',
     ]
